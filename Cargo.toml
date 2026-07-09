@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/gdelta-core",
+  "crates/gdelta-encode-wasm",
+  "crates/gdelta-decode-wasm",
+  "crates/zstd-compress-wasm",
+  "crates/zstd-decompress-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Size-oriented release profile for the wasm artifacts. GDelta encode remains
+# well under the latency budget (sub-ms at 50KB) even at opt-level = "z".
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

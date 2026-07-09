@@ -1,0 +1,13 @@
+[package]
+name = "zstd-compress-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Zstd streaming compress-only wasm artifact (libzstd via zstd-sys)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zstd-sys = { version = "2", default-features = false, features = ["std"] }

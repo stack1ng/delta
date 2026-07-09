@@ -1,0 +1,13 @@
+[package]
+name = "gdelta-encode-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "GDelta encode-only wasm artifact"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gdelta-core = { path = "../gdelta-core" }
