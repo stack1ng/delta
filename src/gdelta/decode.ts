@@ -153,14 +153,19 @@ export function decodeDelta(
   }
 
   async function abandonSource(reason: unknown): Promise<void> {
-    if (reader !== undefined) {
+    // Claim the reader before awaiting (the local-ownership rule): a pull
+    // failure and a consumer cancel can both get here, and the second
+    // entrant must see no owned reader rather than re-cancel or touch a
+    // variable the first entrant clears mid-await.
+    const owned = reader;
+    reader = undefined;
+    if (owned !== undefined) {
       try {
-        await reader.cancel(reason);
+        await owned.cancel(reason);
       } catch {
         // The source may already be errored; nothing left to release.
       }
-      reader.releaseLock();
-      reader = undefined;
+      owned.releaseLock();
     }
   }
 

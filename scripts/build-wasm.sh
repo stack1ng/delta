@@ -13,9 +13,10 @@ OUT=wasm
 
 # Start clean before any fallible step (compiler check, cargo build): a
 # build that fails early must not leave a removed backend's stale artifact
-# sitting in the publishable output directory.
+# sitting in the publishable output directory. Fail closed: -f tolerates
+# absent glob targets, but a real deletion failure must stop the build.
 mkdir -p "$OUT"
-rm -f "$OUT"/*.wasm "$OUT"/.*.tmp.wasm 2>/dev/null || true
+rm -f "$OUT"/*.wasm "$OUT"/.*.tmp.wasm
 
 if ! "${CC_wasm32_unknown_unknown:-clang}" --print-targets 2>/dev/null | grep -q wasm32; then
   echo "error: no wasm32-capable C compiler found for libzstd." >&2

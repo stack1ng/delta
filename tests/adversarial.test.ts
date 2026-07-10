@@ -570,10 +570,10 @@ describe.skipIf(!existsSync(join(wasmDir, "zstd_decompress.wasm")))(
       expect(await mod.decompress(await compress(input))).toEqual(input);
     });
 
-    it("validates an explicit source even when already initialized (first-wins)", async () => {
+    it("init() after success is a no-op that never executes a later module", async () => {
       const dist = join(import.meta.dirname, "..", "dist", "zstd", "decompress.js");
-      const mod = (await import(`${pathToFileURL(dist).href}?first-wins-probe`)) as {
-        init(source?: WebAssembly.Module | Uint8Array): Promise<void>;
+      const mod = (await import(`${pathToFileURL(dist).href}?singleton-probe`)) as {
+        init(source?: WebAssembly.Module): Promise<void>;
         decompress(bytes: Uint8Array): Promise<Uint8Array>;
       };
       await mod.init(
@@ -583,15 +583,56 @@ describe.skipIf(!existsSync(join(wasmDir, "zstd_decompress.wasm")))(
       const frame = await compress(input);
       expect(await mod.decompress(frame)).toEqual(input);
 
-      // A wrong-direction module and invalid bytes both still reject...
-      const wrong = await WebAssembly.compile(await readFile(join(wasmDir, "gdelta_encode.wasm")));
-      await expect(mod.init(wrong)).rejects.toThrow(/missing required exports/);
-      await expect(mod.init(Uint8Array.of(0, 1, 2, 3))).rejects.toThrow();
-      // ...without disturbing the live instance or blocking a correct init.
+      // init() must take effect only before first use: a later source is
+      // ignored without being instantiated. This module traps in its start
+      // function, so any execution side effect would surface as rejection.
+      const trapOnStart = await WebAssembly.compile(
+        Uint8Array.from([
+          0x00,
+          0x61,
+          0x73,
+          0x6d,
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          ...section(1, [1, 0x60, 0, 0]),
+          ...section(3, [1, 0]),
+          ...section(8, [0]),
+          ...section(10, [1, 3, 0, 0x00, 0x0b]),
+        ]),
+      );
+      await expect(mod.init(trapOnStart)).resolves.toBeUndefined();
       expect(await mod.decompress(frame)).toEqual(input);
-      await expect(
-        mod.init(await WebAssembly.compile(await readFile(join(wasmDir, "zstd_decompress.wasm")))),
-      ).resolves.toBeUndefined();
     });
   },
 );
+
+describe("gdelta decode source-reader ownership", () => {
+  it("overlapping pull failure and consumer cancel settle cleanly", async () => {
+    let sourceCancels = 0;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // One oversized chunk trips maxPatchBytes inside decode's pull.
+        controller.enqueue(new Uint8Array(2048));
+      },
+      cancel() {
+        sourceCancels += 1;
+        // Settle slowly so a competing abandonment can arrive mid-await.
+        return new Promise((r) => setTimeout(r, 30));
+      },
+    });
+    const reader = decodeDelta(new Uint8Array(4), source, { maxPatchBytes: 1024 }).getReader();
+    const read = reader.read();
+    read.catch(() => {});
+    // Let the pull failure enter abandonSource and start awaiting the slow
+    // source cancel, then race the public cancel against it. The regression
+    // guarded here: the competing abandonment must not surface a secondary
+    // undefined-reader TypeError out of the public cancel().
+    await new Promise((r) => setTimeout(r, 10));
+    await expect(reader.cancel("consumer cancel")).resolves.toBeUndefined();
+    // Cancellation was requested first, so the pending read settles closed.
+    await expect(read).resolves.toMatchObject({ done: true });
+    expect(sourceCancels).toBe(1);
+  });
+});

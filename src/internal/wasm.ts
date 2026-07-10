@@ -70,10 +70,7 @@ async function compileFrom(source: WasmSource | undefined, url: URL): Promise<We
 export interface LazyWasm<E extends BaseWasmExports> {
   /**
    * Optionally pre-initializes the module, overriding the default loading
-   * strategy. The first successful initialization wins: live streams hold
-   * pointers into its memory, so it is never replaced. A later call with an
-   * explicit source still fully validates that source (rejecting on a wrong
-   * or invalid artifact) without touching the cached instance.
+   * strategy. Must be called before first use to take effect.
    */
   init(source?: WasmSource): Promise<void>;
   /** Returns the instantiated exports, loading the module on first call. */
@@ -130,18 +127,8 @@ export function lazyWasm<E extends BaseWasmExports>(
 
   return {
     async init(source?: WasmSource): Promise<void> {
-      const existing = instantiated;
-      if (existing === undefined) {
-        instantiated = instantiate(source);
-        await instantiated;
-        return;
-      }
-      await existing;
-      if (source !== undefined) {
-        // Already initialized: validate the explicit source anyway (see the
-        // interface contract) and discard the spare instance on success.
-        await instantiate(source);
-      }
+      instantiated ??= instantiate(source);
+      await instantiated;
     },
     exports(): Promise<E> {
       instantiated ??= instantiate();
