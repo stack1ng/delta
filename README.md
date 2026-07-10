@@ -13,7 +13,7 @@ WASM-capable bundler runtimes (Vite/Rolldown, Convex, workers).
 Bytes and Web Streams only. No string/JSON helpers, no filesystem API.
 Each entrypoint loads its own small wasm binary, lazily.
 
-AI Usage disclaimer: This project was initially designed and implemented by fable 5, with many rounds of adversarial review between fable 5 and gpt-5.6 ultra.
+AI Usage disclaimer: This project was initially designed by myself, and implemented by fable 5. It also went through multiple rounds of adversarial review between fable 5 and gpt-5.6 ultra.
 
 ## Representative numbers
 
