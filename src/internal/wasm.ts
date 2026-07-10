@@ -42,10 +42,12 @@ async function compileFrom(source: WasmSource | undefined, url: URL): Promise<We
     return source;
   }
   if (source !== undefined && !(source instanceof URL)) {
-    if (source instanceof Response) {
+    // Guarded: minimal runtimes without Fetch lack a global Response, and
+    // explicit bytes are exactly the escape hatch such runtimes use.
+    if (typeof Response !== "undefined" && source instanceof Response) {
       return compileResponse(source);
     }
-    return WebAssembly.compile(source);
+    return WebAssembly.compile(source as BufferSource);
   }
 
   const target = source instanceof URL ? source : url;

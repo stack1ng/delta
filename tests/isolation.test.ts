@@ -55,6 +55,8 @@ describe.skipIf(!built)("entry isolation (static import graph)", () => {
     ["gdelta/decode.js", ["gdelta_decode.wasm"]],
     ["zstd/compress.js", ["zstd_compress.wasm"]],
     ["zstd/decompress.js", ["zstd_decompress.wasm"]],
+    ["pipeline/encode.js", ["gdelta_encode.wasm", "zstd_compress.wasm"]],
+    ["pipeline/decode.js", ["gdelta_decode.wasm", "zstd_decompress.wasm"]],
     [
       "pipeline/index.js",
       ["gdelta_encode.wasm", "gdelta_decode.wasm", "zstd_compress.wasm", "zstd_decompress.wasm"],

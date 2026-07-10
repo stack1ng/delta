@@ -6,7 +6,7 @@
 //! borrows the base rather than copying it.
 
 use gdelta_core::StreamDecoder;
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{alloc, dealloc, Layout};
 
 /// Allocates `len` bytes (1-aligned) inside wasm memory.
 ///

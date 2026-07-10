@@ -74,7 +74,25 @@ describe.skipIf(!built)("bundler asset budget (rolldown)", () => {
     expect(result.referenced).toEqual(["gdelta_decode"]);
   });
 
-  it("pipeline decode-only import drops the encode-side wasm", async () => {
+  it("pipeline decode leaf references AND emits only the decode side", async () => {
+    const result = await bundle(`
+      import { decodeFramed } from "${join(dist, "pipeline", "decode.js")}";
+      console.log(typeof decodeFramed);
+    `);
+    expect(result.referenced).toEqual(["gdelta_decode", "zstd_decompress"]);
+    expect(result.emitted).toEqual(["gdelta_decode", "zstd_decompress"]);
+  });
+
+  it("pipeline encode leaf references AND emits only the encode side", async () => {
+    const result = await bundle(`
+      import { encodeFramed } from "${join(dist, "pipeline", "encode.js")}";
+      console.log(typeof encodeFramed);
+    `);
+    expect(result.referenced).toEqual(["gdelta_encode", "zstd_compress"]);
+    expect(result.emitted).toEqual(["gdelta_encode", "zstd_compress"]);
+  });
+
+  it("combined pipeline decode-only import still drops encode-side references", async () => {
     const result = await bundle(`
       import { decodeFramed } from "${join(dist, "pipeline", "index.js")}";
       console.log(typeof decodeFramed);

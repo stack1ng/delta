@@ -197,7 +197,10 @@ mod tests {
         for value in [0u64, 1, 127, 128, 16383, 16384, 1 << 40, u64::MAX] {
             let mut buffer = BufferStream::with_capacity(10);
             write_varint(&mut buffer, value);
-            assert_eq!(parse_varint(buffer.as_slice()), Parsed::Done(value, buffer.len()));
+            assert_eq!(
+                parse_varint(buffer.as_slice()),
+                Parsed::Done(value, buffer.len())
+            );
         }
     }
 

@@ -33,6 +33,14 @@
       "types": "./dist/pipeline/index.d.ts",
       "default": "./dist/pipeline/index.js"
     },
+    "./pipeline/encode": {
+      "types": "./dist/pipeline/encode.d.ts",
+      "default": "./dist/pipeline/encode.js"
+    },
+    "./pipeline/decode": {
+      "types": "./dist/pipeline/decode.d.ts",
+      "default": "./dist/pipeline/decode.js"
+    },
     "./wasm/*.wasm": "./wasm/*.wasm"
   },
   "files": [
@@ -49,8 +57,9 @@
     "build:wasm": "./scripts/build-wasm.sh",
     "build:ts": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check . && oxlint",
-    "lint:fix": "biome check --write . && oxlint --fix",
+    "lint": "biome check . && oxlint && bun run lint:rust",
+    "lint:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "lint:fix": "biome check --write . && oxlint --fix && cargo fmt --all",
     "test": "vitest run",
     "test:rust": "cargo test --workspace",
     "bench": "node scripts/bench.ts",

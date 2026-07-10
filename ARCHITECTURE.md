@@ -7,7 +7,9 @@ src/gdelta/encode.ts   → wasm/gdelta_encode.wasm    (~19 KB)
 src/gdelta/decode.ts   → wasm/gdelta_decode.wasm    (~16 KB)
 src/zstd/compress.ts   → wasm/zstd_compress.wasm    (~235 KB)
 src/zstd/decompress.ts → wasm/zstd_decompress.wasm  (~71 KB)
-src/pipeline/index.ts  → imports the four entries above; no fused wasm
+src/pipeline/encode.ts → gdelta encode + zstd compress (no fused wasm)
+src/pipeline/decode.ts → gdelta decode + zstd decompress
+src/pipeline/index.ts  → re-exports both directions
 src/index.ts           → convenience re-exports only
 src/internal/          → wasm loader, byte helpers, codec pump; no wasm refs
 ```
@@ -93,11 +95,13 @@ output, or produce none at all):
   (`decompress`, `decodeDelta`, `decodeFramed`).
 - `maxPatchBytes` — the gdelta patch itself, which bounds the decoder's
   instruction-block buffer (`decodeDelta`, `decodeFramed`).
-- `maxWindowBytes` — the zstd frame history window, checked before the
-  window buffer is allocated (`decompressTransform`, `decodeFramed`).
-  Deliberately explicit: streaming encoders declare the level's default
-  window (2 MiB at level 3) even for tiny payloads, so deriving this from
-  an output cap would reject valid frames.
+- `maxWindowBytes` — the zstd frame history window, checked byte-exactly
+  against each frame's header (staged and parsed before the decoder sees
+  it) and rejected before the window buffer is allocated
+  (`decompressTransform`, `decodeFramed`). Deliberately explicit:
+  streaming encoders declare the level's default window (2 MiB at level 3)
+  even for tiny payloads, so deriving this from an output cap would reject
+  valid frames.
 
 Uncapped decode buffers remain proportional to the input the caller
 chooses to feed, per the table above.

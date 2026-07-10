@@ -6,8 +6,11 @@
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(import.meta.dirname, "..");
+// Not import.meta.dirname: that needs Node >= 20.11, and this gate must be
+// able to fail loudly on every engines-supported runtime.
+const root = resolve(fileURLToPath(import.meta.url), "..", "..");
 const required = [
   "dist/index.js",
   "dist/index.d.ts",

@@ -11,9 +11,9 @@
 
 use crate::buffer::{BufferStream, INIT_BUFFER_SIZE};
 use crate::error::Result;
-use crate::gear::{WORD_SIZE, build_hash_table, compute_fingerprint, roll_fingerprint};
+use crate::gear::{build_hash_table, compute_fingerprint, roll_fingerprint, WORD_SIZE};
 use crate::stream::StreamDecoder;
-use crate::varint::{DeltaUnit, write_delta_unit, write_varint};
+use crate::varint::{write_delta_unit, write_varint, DeltaUnit};
 
 /// Minimum length for prefix/suffix optimization.
 const MIN_MATCH_LENGTH: usize = 16;

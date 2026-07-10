@@ -98,22 +98,27 @@ export function encodeDelta(
         // immediately, not after start settles): encode nothing.
         return;
       }
-      const basePtr = checkedAlloc(oldBytes.length);
-      if (basePtr !== 0) {
-        copyIn(exports.memory, basePtr, oldBytes);
-      }
-      const newPtr = checkedAlloc(target.length);
-      if (newPtr !== 0) {
-        copyIn(exports.memory, newPtr, target);
-      }
-
-      handle = exports.gdelta_encode(newPtr, target.length, basePtr, oldBytes.length);
-
-      if (newPtr !== 0) {
-        exports.wfree(newPtr, target.length);
-      }
-      if (basePtr !== 0) {
-        exports.wfree(basePtr, oldBytes.length);
+      // Two allocations feed one encode call; free both on every path so a
+      // second allocation failing cannot strand the first.
+      let basePtr = 0;
+      let newPtr = 0;
+      try {
+        basePtr = checkedAlloc(oldBytes.length);
+        if (basePtr !== 0) {
+          copyIn(exports.memory, basePtr, oldBytes);
+        }
+        newPtr = checkedAlloc(target.length);
+        if (newPtr !== 0) {
+          copyIn(exports.memory, newPtr, target);
+        }
+        handle = exports.gdelta_encode(newPtr, target.length, basePtr, oldBytes.length);
+      } finally {
+        if (newPtr !== 0) {
+          exports.wfree(newPtr, target.length);
+        }
+        if (basePtr !== 0) {
+          exports.wfree(basePtr, oldBytes.length);
+        }
       }
 
       resultPtr = exports.gdelta_result_ptr(handle);

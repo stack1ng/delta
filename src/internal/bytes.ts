@@ -19,8 +19,9 @@ export function asBytes(input: Uint8Array | ArrayBuffer): Uint8Array {
 }
 
 /**
- * Validates a byte-cap option: a non-negative integer or Infinity.
- * `undefined` means uncapped.
+ * Validates a byte-cap option: a non-negative safe integer or Infinity.
+ * `undefined` means uncapped. Safe integers only — larger values cannot
+ * count bytes exactly across the JS/wasm boundary.
  */
 export function validateByteCap(value: number | undefined, name: string): number {
   if (value === undefined) {
@@ -28,11 +29,10 @@ export function validateByteCap(value: number | undefined, name: string): number
   }
   const valid =
     typeof value === "number" &&
-    !Number.isNaN(value) &&
     value >= 0 &&
-    (value === Number.POSITIVE_INFINITY || Number.isInteger(value));
+    (value === Number.POSITIVE_INFINITY || Number.isSafeInteger(value));
   if (!valid) {
-    throw new TypeError(`${name} must be a non-negative integer (or Infinity)`);
+    throw new TypeError(`${name} must be a non-negative safe integer (or Infinity)`);
   }
   return value;
 }

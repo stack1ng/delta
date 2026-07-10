@@ -4,7 +4,7 @@
 //! calls `gdelta_encode`, then reads the result out of wasm memory via
 //! `gdelta_result_ptr`/`gdelta_result_len` and frees both sides.
 
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{alloc, dealloc, Layout};
 
 /// Allocates `len` bytes (1-aligned) inside wasm memory.
 ///

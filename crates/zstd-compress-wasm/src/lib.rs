@@ -5,9 +5,9 @@
 //! produced, so no intermediate buffers accumulate on the Rust side.
 
 use core::ffi::c_void;
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{alloc, dealloc, Layout};
 use zstd_sys::{
-    ZSTD_CCtx, ZSTD_EndDirective, ZSTD_cParameter, ZSTD_CCtx_setParameter, ZSTD_compressStream2,
+    ZSTD_CCtx, ZSTD_CCtx_setParameter, ZSTD_EndDirective, ZSTD_cParameter, ZSTD_compressStream2,
     ZSTD_createCCtx, ZSTD_freeCCtx, ZSTD_inBuffer, ZSTD_isError, ZSTD_outBuffer,
 };
 

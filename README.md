@@ -42,18 +42,21 @@ and `fetch`/explicit `init()`.
 | `@futuralabs/delta/gdelta/decode` | `decodeDelta`, `decodeDeltaBytes`, `init` | `gdelta_decode.wasm` (~16 KB) |
 | `@futuralabs/delta/zstd/compress` | `compressTransform`, `compress`, `init` | `zstd_compress.wasm` (~235 KB) |
 | `@futuralabs/delta/zstd/decompress` | `decompressTransform`, `decompress`, `init` | `zstd_decompress.wasm` (~71 KB) |
-| `@futuralabs/delta/pipeline` | `encodeFramed`, `decodeFramed`, `*Bytes`, frame constants | the four above, each still lazy |
+| `@futuralabs/delta/pipeline` | both directions + frame constants | the four above, each still lazy |
+| `@futuralabs/delta/pipeline/encode` | `encodeFramed`, `encodeFramedBytes` | encode-side pair only |
+| `@futuralabs/delta/pipeline/decode` | `decodeFramed`, `decodeFramedBytes` | decode-side pair only |
 | `@futuralabs/delta/wasm/*.wasm` | the raw artifacts, for bundler `?url` imports and explicit `init()` | — |
 | `@futuralabs/delta` | re-exports everything (`init` renamed per algo) | none until first call |
 
 Importing one entry never loads another entry's wasm — enforced by tests,
-not just documentation, including a real Rolldown bundle test: a leaf
-import emits exactly one wasm asset, a root import of one function
-references only that entry's asset (the module-level loaders are
-`@__PURE__`-annotated), and even the pipeline tree-shakes per direction —
-importing only `decodeFramed` drops both encode-side artifacts. Note that
+not just documentation, including a real Rolldown bundle test: an
+algorithm leaf emits exactly one wasm asset and the directional pipeline
+leaves emit exactly their two. Root imports reference only the used
+entry's asset (the module-level loaders are `@__PURE__`-annotated), and
+even the combined `/pipeline` entry tree-shakes per direction. Note that
 Rolldown ≤1.1 may still *copy* unreferenced `.wasm` files into the output
-directory at scan time; they are never loaded.
+directory at scan time for non-leaf imports; they are never loaded — use
+the leaf entries when the deployed asset set must be minimal.
 
 ## Usage
 
@@ -137,10 +140,11 @@ const restored: ReadableStream<Uint8Array> = decodeDelta(old, patch);
     `decodeFramed`);
   - `maxPatchBytes` — the gdelta patch itself, i.e. decoder memory
     (`decodeDelta`, `decodeFramed`);
-  - `maxWindowBytes` — the zstd history window, rejected before
-    allocation (`decompressTransform`, `decodeFramed`). Explicit rather
-    than derived: streaming encoders declare the level's default window
-    (2 MiB at level 3) even for tiny payloads.
+  - `maxWindowBytes` — the zstd history window, checked byte-exactly
+    against each frame header and rejected before the window is allocated
+    (`decompressTransform`, `decodeFramed`). Explicit rather than derived:
+    streaming encoders declare the level's default window (2 MiB at
+    level 3) even for tiny payloads.
 - Cancelling any stream — including before initialization finishes —
   frees wasm resources and cancels/unlocks the upstream source; aborting a
   writer with a write in flight settles rather than deadlocking.

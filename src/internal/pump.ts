@@ -48,9 +48,12 @@ export interface PumpCodec<E extends BaseWasmExports> {
     outCap: number,
   ): bigint;
   stepError: string;
+  /** Optional per-code error message for negative step results. */
+  stepErrorFor?(code: number): string;
   /**
    * One bounded finalization step after input ends. Runs until `done`;
-   * throws to reject the stream (e.g. a truncated frame).
+   * throws to reject the stream (e.g. a truncated frame). Must make
+   * progress: `{produced: 0, done: false}` is treated as a codec error.
    */
   end(exports: E, ctx: number, outPtr: number, outCap: number): { produced: number; done: boolean };
   free(exports: E, ctx: number): void;
@@ -104,22 +107,30 @@ export function codecPair<E extends BaseWasmExports>(
   }
 
   function ensureReady(): Promise<void> {
-    ready ??= codec.exports().then((e) => {
-      exports = e;
-      if (failed) {
-        // Torn down while the module was still loading: create nothing, so
-        // there is nothing to leak.
-        return;
-      }
-      ctx = codec.create(e);
-      if (ctx === 0) {
-        throw new Error(codec.createError);
-      }
-      outPtr = e.walloc(OUT_CAP);
-      if (outPtr === 0) {
-        throw new Error("wasm memory exhausted");
-      }
-    });
+    ready ??= codec
+      .exports()
+      .then((e) => {
+        exports = e;
+        if (failed) {
+          // Torn down while the module was still loading: create nothing,
+          // so there is nothing to leak.
+          return;
+        }
+        ctx = codec.create(e);
+        if (ctx === 0) {
+          throw new Error(codec.createError);
+        }
+        outPtr = e.walloc(OUT_CAP);
+        if (outPtr === 0) {
+          throw new Error("wasm memory exhausted");
+        }
+      })
+      .catch((error) => {
+        // Route setup failure through fail(): partial resources (a created
+        // ctx without an out buffer) are freed, and the writable errors so
+        // a piped upstream source is cancelled instead of stranded.
+        throw fail(error);
+      });
     return ready;
   }
 
@@ -196,7 +207,7 @@ export function codecPair<E extends BaseWasmExports>(
             throw fail(error);
           }
           if (packed < 0n) {
-            throw fail(new Error(codec.stepError));
+            throw fail(new Error(codec.stepErrorFor?.(Number(packed)) ?? codec.stepError));
           }
           pending.pos = Number(packed >> 32n);
           const produced = Number(packed & 0xffffffffn);
@@ -229,6 +240,10 @@ export function codecPair<E extends BaseWasmExports>(
               result = codec.end(e, ctx, outPtr, OUT_CAP);
             } catch (error) {
               throw fail(error);
+            }
+            if (result.produced === 0 && !result.done) {
+              // Finalization must make progress or the loop would spin.
+              throw fail(new Error(codec.stepError));
             }
             countOutput(result.produced);
             finished = result.done;

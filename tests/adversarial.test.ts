@@ -11,10 +11,24 @@ import { describe, expect, it } from "vitest";
 import { decodeDelta, decodeDeltaBytes } from "../src/gdelta/decode.js";
 import { encodeDelta, encodeDeltaBytes } from "../src/gdelta/encode.js";
 import { lazyWasm } from "../src/internal/wasm.js";
-import { decodeFramedBytes, encodeFramed, FRAME_MAGIC, FrameAlgo } from "../src/pipeline/index.js";
+import {
+  decodeFramed,
+  decodeFramedBytes,
+  encodeFramed,
+  encodeFramedBytes,
+  FRAME_MAGIC,
+  FrameAlgo,
+} from "../src/pipeline/index.js";
 import { compress } from "../src/zstd/compress.js";
 import { decompress, decompressTransform } from "../src/zstd/decompress.js";
-import { buildPatch, concatBytes, jsonSnapshot, randomBytes, writeCopy } from "./helpers.js";
+import {
+  buildPatch,
+  concatBytes,
+  jsonSnapshot,
+  mutateSnapshot,
+  randomBytes,
+  writeCopy,
+} from "./helpers.js";
 
 const wasmDir = resolve(import.meta.dirname, "..", "wasm");
 
@@ -247,5 +261,147 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("wasm loader",
     await expect(loader.init(new Uint8Array([1, 2, 3]))).rejects.toThrow();
     const good = await readFile(join(wasmDir, "gdelta_decode.wasm"));
     await expect(loader.init(good)).resolves.toBeUndefined();
+  });
+});
+
+describe("framed source ownership on failure paths", () => {
+  async function frameBody(algo: number, old: Uint8Array): Promise<Uint8Array> {
+    switch (algo) {
+      case FrameAlgo.RawFull:
+        return old;
+      case FrameAlgo.GdeltaRaw:
+        return encodeDeltaBytes(old, old);
+      case FrameAlgo.FullZstd:
+        return compress(old);
+      default:
+        return compress(await encodeDeltaBytes(old, old));
+    }
+  }
+
+  it("source error after a valid header unlocks the source (all algos)", async () => {
+    const old = jsonSnapshot(400, 100);
+    for (const algo of Object.values(FrameAlgo)) {
+      const body = await frameBody(algo, old);
+      const header = new Uint8Array([FRAME_MAGIC[0], FRAME_MAGIC[1], 0x01, algo]);
+      const partial = concatBytes(header, body.subarray(0, Math.floor(body.length / 2)));
+
+      let emitted = false;
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!emitted) {
+            emitted = true;
+            controller.enqueue(partial);
+            return;
+          }
+          controller.error(new Error("network reset"));
+        },
+      });
+      await expect(decodeFramedBytes(old, source)).rejects.toThrow();
+      expect(source.locked).toBe(false);
+    }
+  });
+
+  it("an invalid RawFull body chunk cancels and unlocks a stalled source", async () => {
+    let cancelled = false;
+    let emitted = false;
+    const source = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (!emitted) {
+          emitted = true;
+          controller.enqueue(new Uint8Array([FRAME_MAGIC[0], FRAME_MAGIC[1], 0x01, 0x00]));
+          controller.enqueue("not bytes" as unknown as Uint8Array);
+          return;
+        }
+        await new Promise(() => {});
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await expect(decodeFramedBytes(new Uint8Array(0), source)).rejects.toThrow(TypeError);
+    expect(cancelled).toBe(true);
+    expect(source.locked).toBe(false);
+  });
+
+  it("immediate cancellation unlocks a prequeued source", async () => {
+    const old = jsonSnapshot(401, 50);
+    const framed = await encodeFramedBytes(old, old);
+    for (let run = 0; run < 20; run++) {
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(framed);
+          controller.close();
+        },
+      });
+      const reader = decodeFramed(old, source).getReader();
+      await reader.cancel(new Error("gone"));
+      expect(source.locked).toBe(false);
+    }
+  });
+});
+
+describe("exact window semantics", () => {
+  it("enforces maxWindowBytes byte-exactly against the frame header", async () => {
+    // Level-3 streaming frames declare exactly a 2 MiB window.
+    const compressed = await compress(jsonSnapshot(402, 100));
+    const window = 2 * 1024 * 1024;
+    expect((await decompress(compressed, { maxWindowBytes: window })).length).toBeGreaterThan(0);
+    await expect(decompress(compressed, { maxWindowBytes: window - 1 })).rejects.toThrow(
+      /maxWindowBytes/,
+    );
+  });
+
+  it("accepts huge finite window caps without rejecting valid frames", async () => {
+    const compressed = await compress(jsonSnapshot(403, 100));
+    for (const cap of [2 ** 31, Number.MAX_SAFE_INTEGER - 1]) {
+      expect((await decompress(compressed, { maxWindowBytes: cap })).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("applies the window cap through framed decode", async () => {
+    const old = jsonSnapshot(404, 200);
+    const framed = await encodeFramedBytes(old, mutateSnapshot(old, 405));
+    expect(framed[3]).toBe(FrameAlgo.GdeltaZstd);
+    await expect(decodeFramedBytes(old, framed, { maxWindowBytes: 64 * 1024 })).rejects.toThrow(
+      /maxWindowBytes/,
+    );
+    expect(await decodeFramedBytes(old, framed, { maxWindowBytes: 2 * 1024 * 1024 })).toEqual(
+      mutateSnapshot(old, 405),
+    );
+  });
+});
+
+describe("numeric range strictness", () => {
+  it("rejects out-of-range compression levels instead of wrapping", async () => {
+    const { compressTransform } = await import("../src/zstd/compress.js");
+    for (const bad of [2 ** 32 + 3, 2 ** 40, 23, -131073]) {
+      expect(() => compressTransform({ level: bad })).toThrow(TypeError);
+    }
+    // The true boundaries stay usable.
+    const input = jsonSnapshot(406, 50);
+    expect(await decompress(await compress(input, { level: 22 }))).toEqual(input);
+    expect(await decompress(await compress(input, { level: -131072 }))).toEqual(input);
+  });
+
+  it("rejects unsafe-large byte caps", () => {
+    for (const bad of [1e100, 2 ** 53, Number.MAX_VALUE]) {
+      expect(() => decompressTransform({ maxOutputBytes: bad })).toThrow(TypeError);
+    }
+    expect(() => decompressTransform({ maxOutputBytes: 2 ** 53 - 1 })).not.toThrow();
+  });
+});
+
+describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("minimal runtimes", () => {
+  it("explicit byte init works without a global Response", async () => {
+    const bytes = await readFile(join(wasmDir, "gdelta_decode.wasm"));
+    const originalResponse = globalThis.Response;
+    // biome-ignore lint/suspicious/noExplicitAny: deliberate global surgery
+    (globalThis as any).Response = undefined;
+    try {
+      const loader = lazyWasm(new URL("file:///nonexistent.wasm"));
+      await expect(loader.init(new Uint8Array(bytes))).resolves.toBeUndefined();
+    } finally {
+      globalThis.Response = originalResponse;
+    }
   });
 });

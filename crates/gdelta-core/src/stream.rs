@@ -10,7 +10,7 @@
 //! stay buffered.
 
 use crate::error::{GDeltaError, Result};
-use crate::varint::{DeltaUnit, Parsed, parse_delta_unit, parse_varint};
+use crate::varint::{parse_delta_unit, parse_varint, DeltaUnit, Parsed};
 
 /// Threshold above which the consumed prefix of the literal buffer is
 /// compacted away.
@@ -92,19 +92,21 @@ impl<'a> StreamDecoder<'a> {
                 // cannot finish parsing inside it is malformed.
                 Parsed::Incomplete | Parsed::Invalid => return Err(GDeltaError::InvalidDelta),
                 Parsed::Done(unit, consumed) => {
-                    self.inst_pos += consumed;
-                    // Zero-length units are format-representable (our encoder
-                    // never emits them, but a spec-valid third-party delta
-                    // may): skip them — including no-op copies, whose offset
-                    // never gets dereferenced — rather than stall or reject.
-                    if unit.length == 0 {
-                        continue;
-                    }
+                    // Bounds are validated before the zero-length skip to
+                    // match the upstream reference: copy(base.len(), 0) is
+                    // accepted, copy(base.len() + 1, 0) is not.
                     if unit.is_copy {
                         let end = unit.offset.checked_add(unit.length);
                         if end.is_none_or(|end| end > self.base.len() as u64) {
                             return Err(GDeltaError::OutOfBounds);
                         }
+                    }
+                    self.inst_pos += consumed;
+                    // Zero-length units are format-representable (our encoder
+                    // never emits them, but a spec-valid third-party delta
+                    // may): skip rather than stall on them.
+                    if unit.length == 0 {
+                        continue;
                     }
                     self.current = Some(unit);
                     self.unit_off = 0;
@@ -151,7 +153,8 @@ impl<'a> StreamDecoder<'a> {
                 if n == 0 {
                     break;
                 }
-                out[written..written + n].copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + n]);
+                out[written..written + n]
+                    .copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + n]);
                 self.buf_pos += n;
                 n
             };
@@ -171,7 +174,10 @@ impl<'a> StreamDecoder<'a> {
         if self.buf_pos == self.buf.len() {
             self.buf.clear();
             self.buf_pos = 0;
-        } else if self.buf_pos > COMPACT_THRESHOLD {
+        } else if self.buf_pos > COMPACT_THRESHOLD && self.buf_pos >= self.buf.len() / 2 {
+            // Only compact once at least half the buffer is consumed: each
+            // byte is then shifted O(1) times amortized, keeping large
+            // single-chunk literal patches linear instead of quadratic.
             self.buf.drain(..self.buf_pos);
             self.buf_pos = 0;
         }
@@ -197,7 +203,9 @@ impl<'a> StreamDecoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::BufferStream;
     use crate::delta::encode;
+    use crate::varint::{write_delta_unit, write_varint};
 
     fn stream_decode(delta: &[u8], base: &[u8], chunk_size: usize) -> Result<Vec<u8>> {
         let mut decoder = StreamDecoder::new(base);
@@ -279,9 +287,6 @@ mod tests {
 
     #[test]
     fn out_of_bounds_copy_rejected_when_reached() {
-        use crate::buffer::BufferStream;
-        use crate::varint::{write_delta_unit, write_varint};
-
         let mut inst = BufferStream::with_capacity(8);
         write_delta_unit(&mut inst, &DeltaUnit::copy(0, 32));
         let mut delta = BufferStream::with_capacity(16);
@@ -320,14 +325,55 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_copy_with_wild_offset_is_skipped() {
-        // A no-op copy never dereferences its offset, so a degenerate
-        // third-party unit must not be rejected: varint(2) || copy(99, 0).
-        let delta = [0x02, 0x80, 0x63];
-        let mut decoder = StreamDecoder::new(b"abcdefgh".as_slice());
-        decoder.push(&delta).unwrap();
+    fn zero_length_copy_bounds_match_upstream() {
+        // Upstream accepts copy offsets up to base.len() inclusive for
+        // zero-length units and rejects anything beyond.
+        let base = b"abcdefgh";
         let mut out = [0u8; 8];
+
+        // varint(2) || copy(8, 0): offset == base.len() is in bounds.
+        let mut decoder = StreamDecoder::new(base.as_slice());
+        decoder.push(&[0x02, 0x80, 0x08]).unwrap();
         assert_eq!(decoder.read(&mut out).unwrap(), 0);
+        decoder.finish().unwrap();
+
+        // varint(2) || copy(99, 0): out of bounds, upstream rejects.
+        let mut decoder = StreamDecoder::new(base.as_slice());
+        decoder.push(&[0x02, 0x80, 0x63]).unwrap();
+        assert_eq!(decoder.read(&mut out), Err(GDeltaError::OutOfBounds));
+    }
+
+    #[test]
+    fn large_single_chunk_literal_stays_linear() {
+        // 8 MiB literal pushed as ONE chunk, drained in 64 KiB reads: the
+        // amortized compaction must not shift the tail per read. (A
+        // correctness gate; the quadratic regression showed up as huge
+        // wall-time growth in external probes.)
+        let size = 8 * 1024 * 1024usize;
+        let data = vec![0xA5u8; size];
+        let mut inst = BufferStream::with_capacity(8);
+        write_delta_unit(&mut inst, &DeltaUnit::literal(size as u64));
+        let mut delta = Vec::new();
+        {
+            let mut header = BufferStream::with_capacity(4);
+            write_varint(&mut header, inst.len() as u64);
+            delta.extend_from_slice(header.as_slice());
+        }
+        delta.extend_from_slice(inst.as_slice());
+        delta.extend_from_slice(&data);
+
+        let mut decoder = StreamDecoder::new(b"".as_slice());
+        decoder.push(&delta).unwrap();
+        let mut scratch = vec![0u8; 64 * 1024];
+        let mut total = 0usize;
+        loop {
+            let n = decoder.read(&mut scratch).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        assert_eq!(total, size);
         decoder.finish().unwrap();
     }
 
@@ -378,8 +424,6 @@ mod tests {
         inst.push(0x00);
         let mut delta = Vec::new();
         {
-            use crate::buffer::BufferStream;
-            use crate::varint::write_varint;
             let mut header = BufferStream::with_capacity(4);
             write_varint(&mut header, inst.len() as u64);
             delta.extend_from_slice(header.as_slice());

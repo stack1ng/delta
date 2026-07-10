@@ -45,12 +45,23 @@ export interface CompressOptions {
   level?: number;
 }
 
+// libzstd's real range for the vendored 1.5.7: ZSTD_minCLevel() = -131072,
+// ZSTD_maxCLevel() = 22. Anything outside would silently wrap through the
+// i32 ABI, so reject it here.
+const MIN_LEVEL = -131072;
+const MAX_LEVEL = 22;
+
 function validateLevel(value: number | undefined): number {
   if (value === undefined) {
     return 3;
   }
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new TypeError("level must be an integer");
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < MIN_LEVEL ||
+    value > MAX_LEVEL
+  ) {
+    throw new TypeError(`level must be an integer in [${MIN_LEVEL}, ${MAX_LEVEL}]`);
   }
   return value;
 }
