@@ -163,14 +163,19 @@ export function decodeDelta(
     const owned = reader;
     reader = undefined;
     if (owned !== undefined) {
-      abandonment = (async () => {
+      // Publish the settlement BEFORE any user code can run: owned.cancel()
+      // invokes the source's cancel callback synchronously, and that
+      // callback may re-enter the output's cancel(), which must find this
+      // promise rather than mistake the claimed reader for never-acquired.
+      // The .then() defers the callback until after this assignment.
+      abandonment = Promise.resolve().then(async () => {
         try {
           await owned.cancel(reason);
         } catch {
           // The source may already be errored; nothing left to release.
         }
         owned.releaseLock();
-      })();
+      });
     }
     return abandonment ?? Promise.resolve();
   }

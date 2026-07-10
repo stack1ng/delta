@@ -636,44 +636,55 @@ describe("gdelta decode source-reader ownership", () => {
     expect(sourceCancels).toBe(1);
   });
 
-  it("public cancel is a cleanup barrier for an in-flight abandonment", async () => {
-    let sourceCancels = 0;
+  it("a re-entrant source-callback cancel joins the published abandonment", async () => {
+    let upstreamCancelCalls = 0;
     let releaseGate!: () => void;
     const gate = new Promise<void>((r) => {
       releaseGate = r;
     });
+    let signalEntered!: () => void;
+    const enteredSourceCancel = new Promise<void>((r) => {
+      signalEntered = r;
+    });
+
+    let reader!: ReadableStreamDefaultReader<Uint8Array>;
+    let reentrantCancel!: Promise<void>;
+    let reentrantSettled = false;
+
     const source = new ReadableStream<Uint8Array>({
       pull(controller) {
         // One oversized chunk trips maxPatchBytes inside decode's pull.
         controller.enqueue(new Uint8Array(2048));
       },
       cancel() {
-        sourceCancels += 1;
+        upstreamCancelCalls += 1;
+        // User code re-entering the output's public cancel() synchronously,
+        // while this upstream cancellation is still gated: it must join the
+        // published abandonment, not take the pre-start branch and fulfill.
+        reentrantCancel = reader.cancel("re-entrant").then(() => {
+          reentrantSettled = true;
+        });
+        signalEntered();
         return gate;
       },
     });
-    const reader = decodeDelta(new Uint8Array(4), source, { maxPatchBytes: 1024 }).getReader();
+
+    reader = decodeDelta(new Uint8Array(4), source, { maxPatchBytes: 1024 }).getReader();
     const read = reader.read();
     read.catch(() => {});
-    // Let the pull failure claim the source reader and start awaiting the
-    // gated upstream cancel.
-    await new Promise((r) => setTimeout(r, 10));
 
-    let cancelSettled = false;
-    const cancelPromise = reader.cancel("consumer cancel").then(() => {
-      cancelSettled = true;
-    });
+    // Synchronize on actual entry into the source cancel callback (the
+    // pull-failure path has claimed the reader by then, by construction).
+    await enteredSourceCancel;
     await new Promise((r) => setTimeout(r, 20));
-    // While the upstream cancel is gated, public cancellation must not
-    // report completion and the source must remain locked.
-    expect(cancelSettled).toBe(false);
+    expect(reentrantSettled).toBe(false);
     expect(source.locked).toBe(true);
 
     releaseGate();
-    await cancelPromise;
-    expect(cancelSettled).toBe(true);
+    await reentrantCancel;
+    expect(reentrantSettled).toBe(true);
     expect(source.locked).toBe(false);
-    expect(sourceCancels).toBe(1);
+    expect(upstreamCancelCalls).toBe(1);
     await expect(read).resolves.toMatchObject({ done: true });
   });
 });
