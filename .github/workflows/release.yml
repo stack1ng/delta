@@ -1,0 +1,66 @@
+name: Release to npm
+
+# Token-free npm Trusted Publishing. The package's npm publisher must match
+# stack1ng/pyro-delta, release.yml, and the Production environment exactly.
+# See PUBLISHING.md for bootstrap and one-time external configuration.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  release:
+    name: Build, verify, and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: Production
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing and provenance
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+
+      - name: Set up Node for npm Trusted Publishing
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      # npm Trusted Publishing requires npm >= 11.5.1. Pin the release client
+      # independently from the package's Bun-managed development dependencies.
+      - name: Install npm release client
+        run: npm install --global npm@12.0.1
+
+      - name: Build and check through the pinned dev shell
+        run: nix develop --command bash -c 'bun install --frozen-lockfile && bun run ci'
+
+      - name: Verify tag and pack the exact package
+        id: package
+        env:
+          PACK_DIR: ${{ runner.temp }}/npm-package
+          PACK_MANIFEST: ${{ runner.temp }}/npm-pack.json
+        run: |
+          rm -rf "$PACK_DIR"
+          mkdir -p "$PACK_DIR"
+          npm pack --pack-destination "$PACK_DIR" --json > "$PACK_MANIFEST"
+          node scripts/verify-release.mjs
+
+      - name: Publish with OIDC provenance
+        env:
+          TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          case "$VERSION" in
+            *-*) npm publish "$TARBALL" --access public --provenance --tag alpha ;;
+            *) npm publish "$TARBALL" --access public --provenance ;;
+          esac

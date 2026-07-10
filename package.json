@@ -1,7 +1,15 @@
 {
-  "name": "@futuralabs/delta",
+  "name": "@pyro/delta",
   "version": "0.1.0",
   "description": "Low-level, tree-shakable binary delta (GDelta) + compression (Zstd) with stream-first APIs and per-entry WASM binaries",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stack1ng/pyro-delta.git"
+  },
+  "homepage": "https://github.com/stack1ng/pyro-delta#readme",
+  "bugs": {
+    "url": "https://github.com/stack1ng/pyro-delta/issues"
+  },
   "type": "module",
   "license": "MIT",
   "sideEffects": false,
@@ -49,9 +57,14 @@
     "README.md",
     "FRAME.md",
     "ARCHITECTURE.md",
+    "CHANGELOG.md",
     "NOTICE",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "build": "bun run build:wasm && bun run build:ts",
     "build:wasm": "./scripts/build-wasm.sh",
@@ -64,6 +77,10 @@
     "test:rust": "cargo test --workspace",
     "bench": "node scripts/bench.ts",
     "prepack": "node scripts/check-artifacts.mjs",
+    "preversion": "bun install --frozen-lockfile && bun run ci",
+    "version": "node scripts/changelog.mjs && git add CHANGELOG.md",
+    "release": "node scripts/release.mjs",
+    "alpha": "npm version prerelease --preid alpha && git push --follow-tags",
     "ci": "bun run build && bun run typecheck && bun run lint && bun run test:rust && bun run test"
   },
   "devDependencies": {

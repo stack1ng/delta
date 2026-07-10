@@ -1,4 +1,4 @@
-# @futuralabs/delta
+# @pyro/delta
 
 Low-level, tree-shakable binary delta + compression for Node and
 WASM-capable bundler runtimes (Vite/Rolldown, Convex, workers).
@@ -28,7 +28,7 @@ Encode 0.29 ms, decode 0.06 ms. Run `bun run bench` for the full table.
 ## Install
 
 ```sh
-bun add @futuralabs/delta   # or npm/pnpm/yarn
+bun add @pyro/delta   # or npm/pnpm/yarn
 ```
 
 Requires Node ≥ 20 (Web Streams, wasm) or any runtime with `WebAssembly`
@@ -38,15 +38,15 @@ and `fetch`/explicit `init()`.
 
 | Import | Contents | WASM loaded |
 |---|---|---|
-| `@futuralabs/delta/gdelta/encode` | `encodeDelta`, `encodeDeltaBytes`, `init` | `gdelta_encode.wasm` (~19 KB) |
-| `@futuralabs/delta/gdelta/decode` | `decodeDelta`, `decodeDeltaBytes`, `init` | `gdelta_decode.wasm` (~16 KB) |
-| `@futuralabs/delta/zstd/compress` | `compressTransform`, `compress`, `init` | `zstd_compress.wasm` (~235 KB) |
-| `@futuralabs/delta/zstd/decompress` | `decompressTransform`, `decompress`, `init` | `zstd_decompress.wasm` (~71 KB) |
-| `@futuralabs/delta/pipeline` | both directions + frame constants | the four above, each still lazy |
-| `@futuralabs/delta/pipeline/encode` | `encodeFramed`, `encodeFramedBytes` | encode-side pair only |
-| `@futuralabs/delta/pipeline/decode` | `decodeFramed`, `decodeFramedBytes` | decode-side pair only |
-| `@futuralabs/delta/wasm/*.wasm` | the raw artifacts, for bundler `?url` imports and explicit `init()` | — |
-| `@futuralabs/delta` | re-exports everything (`init` renamed per algo) | none until first call |
+| `@pyro/delta/gdelta/encode` | `encodeDelta`, `encodeDeltaBytes`, `init` | `gdelta_encode.wasm` (~19 KB) |
+| `@pyro/delta/gdelta/decode` | `decodeDelta`, `decodeDeltaBytes`, `init` | `gdelta_decode.wasm` (~16 KB) |
+| `@pyro/delta/zstd/compress` | `compressTransform`, `compress`, `init` | `zstd_compress.wasm` (~235 KB) |
+| `@pyro/delta/zstd/decompress` | `decompressTransform`, `decompress`, `init` | `zstd_decompress.wasm` (~71 KB) |
+| `@pyro/delta/pipeline` | both directions + frame constants | the four above, each still lazy |
+| `@pyro/delta/pipeline/encode` | `encodeFramed`, `encodeFramedBytes` | encode-side pair only |
+| `@pyro/delta/pipeline/decode` | `decodeFramed`, `decodeFramedBytes` | decode-side pair only |
+| `@pyro/delta/wasm/*.wasm` | the raw artifacts, for bundler `?url` imports and explicit `init()` | — |
+| `@pyro/delta` | re-exports everything (`init` renamed per algo) | none until first call |
 
 Importing one entry never loads another entry's wasm — enforced by tests,
 not just documentation, including a real Rolldown bundle test: an
@@ -63,7 +63,7 @@ the leaf entries when the deployed asset set must be minimal.
 ### Framed pipeline (the product path)
 
 ```ts
-import { encodeFramed, decodeFramed } from "@futuralabs/delta/pipeline";
+import { encodeFramed, decodeFramed } from "@pyro/delta/pipeline";
 
 // old, next: Uint8Array
 const wire: ReadableStream<Uint8Array> = encodeFramed(old, next, { zstdLevel: 3 });
@@ -81,8 +81,8 @@ zstd pass over `new`.
 ### Zstd alone, streaming
 
 ```ts
-import { compressTransform } from "@futuralabs/delta/zstd/compress";
-import { decompressTransform } from "@futuralabs/delta/zstd/decompress";
+import { compressTransform } from "@pyro/delta/zstd/compress";
+import { decompressTransform } from "@pyro/delta/zstd/decompress";
 
 const compressed = source.pipeThrough(compressTransform({ level: 3 }));
 const restored = compressed.pipeThrough(decompressTransform({ maxOutputBytes: 1 << 20 }));
@@ -99,8 +99,8 @@ against backpressure instead of materializing.
 ### GDelta alone
 
 ```ts
-import { encodeDelta } from "@futuralabs/delta/gdelta/encode";
-import { decodeDelta } from "@futuralabs/delta/gdelta/decode";
+import { encodeDelta } from "@pyro/delta/gdelta/encode";
+import { decodeDelta } from "@pyro/delta/gdelta/decode";
 
 const patch: ReadableStream<Uint8Array> = encodeDelta(old, next);
 const restored: ReadableStream<Uint8Array> = decodeDelta(old, patch);
@@ -165,12 +165,12 @@ import.meta.url)`:
   hashed asset URL and fetched; nothing to do.
 - **Convex or other sandboxed runtimes** — call the entry's `init()` once
   with your own source before first use. The artifacts are exported as
-  package subpaths (`@futuralabs/delta/wasm/*.wasm`) so bundler asset
+  package subpaths (`@pyro/delta/wasm/*.wasm`) so bundler asset
   imports resolve:
 
   ```ts
-  import { init } from "@futuralabs/delta/gdelta/decode";
-  import wasmUrl from "@futuralabs/delta/wasm/gdelta_decode.wasm?url"; // bundler-specific
+  import { init } from "@pyro/delta/gdelta/decode";
+  import wasmUrl from "@pyro/delta/wasm/gdelta_decode.wasm?url"; // bundler-specific
 
   await init(new URL(wasmUrl, import.meta.url)); // or bytes / WebAssembly.Module / Response
   ```

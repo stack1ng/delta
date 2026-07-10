@@ -5,7 +5,7 @@
  * per-algorithm entries never import each other.
  *
  * This module re-exports both directions for convenience. Import
- * `@futuralabs/delta/pipeline/encode` or `/pipeline/decode` directly when
+ * `@pyro/delta/pipeline/encode` or `/pipeline/decode` directly when
  * only one direction should reach the bundle — each pulls only its own
  * side's wasm. See FRAME.md for the byte-level frame layout.
  */
