@@ -1,6 +1,6 @@
 {
   "name": "@stack1ng/delta",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Low-level, tree-shakable binary delta (GDelta) + compression (Zstd) with stream-first APIs and per-entry WASM binaries",
   "repository": {
     "type": "git",
