@@ -13,6 +13,8 @@ WASM-capable bundler runtimes (Vite/Rolldown, Convex, workers).
 Bytes and Web Streams only. No string/JSON helpers, no filesystem API.
 Each entrypoint loads its own small wasm binary, lazily.
 
+AI Usage disclaimer: This project was initially designed and implemented by fable 5, with many rounds of adversarial review between fable 5 and gpt-5.6 ultra.
+
 ## Representative numbers
 
 JSON-ish 42 KB snapshot with scattered mutations (Apple Silicon, level 3):
