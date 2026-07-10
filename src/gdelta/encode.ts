@@ -118,11 +118,22 @@ export function encodeDelta(
         }
         handle = exports.gdelta_encode(newPtr, target.length, basePtr, oldBytes.length);
       } finally {
-        if (newPtr !== 0) {
-          exports.wfree(newPtr, target.length);
+        // Claim each temporary before its independent best-effort free: a
+        // trapping wfree must not mask the encode error, suppress the other
+        // free, or strand the returned result handle.
+        const liveNew = newPtr;
+        newPtr = 0;
+        if (liveNew !== 0) {
+          try {
+            exports.wfree(liveNew, target.length);
+          } catch {}
         }
-        if (basePtr !== 0) {
-          exports.wfree(basePtr, oldBytes.length);
+        const liveBase = basePtr;
+        basePtr = 0;
+        if (liveBase !== 0) {
+          try {
+            exports.wfree(liveBase, oldBytes.length);
+          } catch {}
         }
       }
 

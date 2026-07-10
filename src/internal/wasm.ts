@@ -70,15 +70,18 @@ async function compileFrom(source: WasmSource | undefined, url: URL): Promise<We
 export interface LazyWasm<E extends BaseWasmExports> {
   /**
    * Optionally pre-initializes the module, overriding the default loading
-   * strategy. Must be called before first use to take effect.
+   * strategy. The first successful initialization wins: live streams hold
+   * pointers into its memory, so it is never replaced. A later call with an
+   * explicit source still fully validates that source (rejecting on a wrong
+   * or invalid artifact) without touching the cached instance.
    */
   init(source?: WasmSource): Promise<void>;
   /** Returns the instantiated exports, loading the module on first call. */
   exports(): Promise<E>;
 }
 
-/** Exports every artifact must provide, on top of the entry's own ABI. */
-const COMMON_EXPORTS = ["memory", "walloc", "wfree"] as const;
+/** Callable exports every artifact must provide, plus the entry's own ABI. */
+const COMMON_CALLABLES = ["walloc", "wfree"] as const;
 
 export function lazyWasm<E extends BaseWasmExports>(
   url: URL,
@@ -90,14 +93,27 @@ export function lazyWasm<E extends BaseWasmExports>(
     const attempt = compileFrom(source, url)
       .then((module) => WebAssembly.instantiate(module, {}))
       .then((instance) => {
-        // Reject a structurally valid but wrong-direction artifact BEFORE
-        // caching it, so a corrected init() can still succeed afterwards.
-        const missing = [...COMMON_EXPORTS, ...requiredExports].filter(
-          (name) => !(name in instance.exports),
-        );
-        if (missing.length > 0) {
+        // Reject a wrong or malformed artifact BEFORE caching it, so a
+        // corrected init() can still succeed afterwards. Names alone are
+        // not enough: a structurally valid module can export `memory` as a
+        // global or a required callable as a non-function.
+        const exportsObject = instance.exports as Record<string, unknown>;
+        const problems: string[] = [];
+        if (!(exportsObject.memory instanceof WebAssembly.Memory)) {
+          problems.push(
+            "memory" in exportsObject ? "memory is not a WebAssembly.Memory" : "memory is missing",
+          );
+        }
+        for (const name of [...COMMON_CALLABLES, ...requiredExports]) {
+          if (typeof exportsObject[name] !== "function") {
+            problems.push(
+              name in exportsObject ? `${name} is not a function` : `${name} is missing`,
+            );
+          }
+        }
+        if (problems.length > 0) {
           throw new Error(
-            `wasm module is missing required exports (wrong artifact?): ${missing.join(", ")}`,
+            `wasm module is missing required exports or exports the wrong kinds (wrong artifact?): ${problems.join("; ")}`,
           );
         }
         return instance.exports as unknown as E;
@@ -114,8 +130,18 @@ export function lazyWasm<E extends BaseWasmExports>(
 
   return {
     async init(source?: WasmSource): Promise<void> {
-      instantiated ??= instantiate(source);
-      await instantiated;
+      const existing = instantiated;
+      if (existing === undefined) {
+        instantiated = instantiate(source);
+        await instantiated;
+        return;
+      }
+      await existing;
+      if (source !== undefined) {
+        // Already initialized: validate the explicit source anyway (see the
+        // interface contract) and discard the spare instance on success.
+        await instantiate(source);
+      }
     },
     exports(): Promise<E> {
       instantiated ??= instantiate();

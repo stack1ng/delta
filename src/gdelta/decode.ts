@@ -240,17 +240,23 @@ export function decodeDelta(
             throw new Error(`delta exceeds maxPatchBytes (${maxPatchBytes})`);
           }
           if (value.length > inCap) {
-            if (inPtr !== 0) {
-              exports.wfree(inPtr, inCap);
-              inPtr = 0;
+            // Claim the old pointer before freeing (a throwing wfree is
+            // never retried by dispose) and record the new pointer before
+            // the copy below, so the outer catch reclaims it exactly once.
+            const oldPtr = inPtr;
+            const oldCap = inCap;
+            inPtr = 0;
+            inCap = 0;
+            if (oldPtr !== 0) {
+              exports.wfree(oldPtr, oldCap);
             }
             const cap = Math.max(value.length, MIN_IN_CAP);
             const ptr = exports.walloc(cap);
             if (ptr === 0) {
               throw new Error("wasm memory exhausted");
             }
-            inCap = cap;
             inPtr = ptr;
+            inCap = cap;
           }
           copyIn(exports.memory, inPtr, value);
           const code = exports.gdelta_decoder_push(ctx, inPtr, value.length);

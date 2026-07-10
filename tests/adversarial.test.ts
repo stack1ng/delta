@@ -495,3 +495,103 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("init() ABI va
     expect(await mod.decompress(await compress(input))).toEqual(input);
   });
 });
+
+const uleb = (value: number): number[] => {
+  const bytes: number[] = [];
+  let rest = value;
+  do {
+    let byte = rest & 0x7f;
+    rest >>>= 7;
+    if (rest !== 0) {
+      byte |= 0x80;
+    }
+    bytes.push(byte);
+  } while (rest !== 0);
+  return bytes;
+};
+const section = (id: number, body: number[]): number[] => [id, ...uleb(body.length), ...body];
+const wasmName = (value: string): number[] => {
+  const bytes = [...new TextEncoder().encode(value)];
+  return [...uleb(bytes.length), ...bytes];
+};
+
+/**
+ * Structurally valid module exporting every expected name with wrong JS
+ * value kinds: `memory` is an i32 global, every callable a () -> () func.
+ */
+function wrongKindModule(required: readonly string[]): Promise<WebAssembly.Module> {
+  const functions = ["walloc", "wfree", ...required];
+  const exportEntries = [
+    [...wasmName("memory"), 3, 0],
+    ...functions.map((name, index) => [...wasmName(name), 0, ...uleb(index)]),
+  ];
+  return WebAssembly.compile(
+    Uint8Array.from([
+      0x00,
+      0x61,
+      0x73,
+      0x6d,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      ...section(1, [1, 0x60, 0, 0]),
+      ...section(3, [...uleb(functions.length), ...functions.map(() => 0)]),
+      ...section(6, [1, 0x7f, 0, 0x41, 0, 0x0b]),
+      ...section(7, [...uleb(exportEntries.length), ...exportEntries.flat()]),
+      ...section(10, [...uleb(functions.length), ...functions.flatMap(() => [2, 0, 0x0b])]),
+    ]),
+  );
+}
+
+describe.skipIf(!existsSync(join(wasmDir, "zstd_decompress.wasm")))(
+  "init() export kind validation",
+  () => {
+    const required = [
+      "zstd_decomp_new",
+      "zstd_decomp_transform",
+      "zstd_decomp_done",
+      "zstd_decomp_free",
+    ];
+
+    it("rejects wrong export value kinds, then a correct retry is byte-correct", async () => {
+      const dist = join(import.meta.dirname, "..", "dist", "zstd", "decompress.js");
+      const mod = (await import(`${pathToFileURL(dist).href}?kind-probe`)) as {
+        init(source: WebAssembly.Module): Promise<void>;
+        decompress(bytes: Uint8Array): Promise<Uint8Array>;
+      };
+      await expect(mod.init(await wrongKindModule(required))).rejects.toThrow(
+        /wrong kinds.*memory is not a WebAssembly\.Memory/,
+      );
+      await mod.init(
+        await WebAssembly.compile(await readFile(join(wasmDir, "zstd_decompress.wasm"))),
+      );
+      const input = jsonSnapshot(500, 77);
+      expect(await mod.decompress(await compress(input))).toEqual(input);
+    });
+
+    it("validates an explicit source even when already initialized (first-wins)", async () => {
+      const dist = join(import.meta.dirname, "..", "dist", "zstd", "decompress.js");
+      const mod = (await import(`${pathToFileURL(dist).href}?first-wins-probe`)) as {
+        init(source?: WebAssembly.Module | Uint8Array): Promise<void>;
+        decompress(bytes: Uint8Array): Promise<Uint8Array>;
+      };
+      await mod.init(
+        await WebAssembly.compile(await readFile(join(wasmDir, "zstd_decompress.wasm"))),
+      );
+      const input = jsonSnapshot(400, 78);
+      const frame = await compress(input);
+      expect(await mod.decompress(frame)).toEqual(input);
+
+      // A wrong-direction module and invalid bytes both still reject...
+      const wrong = await WebAssembly.compile(await readFile(join(wasmDir, "gdelta_encode.wasm")));
+      await expect(mod.init(wrong)).rejects.toThrow(/missing required exports/);
+      await expect(mod.init(Uint8Array.of(0, 1, 2, 3))).rejects.toThrow();
+      // ...without disturbing the live instance or blocking a correct init.
+      expect(await mod.decompress(frame)).toEqual(input);
+      await expect(
+        mod.init(await WebAssembly.compile(await readFile(join(wasmDir, "zstd_decompress.wasm")))),
+      ).resolves.toBeUndefined();
+    });
+  },
+);

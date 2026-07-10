@@ -11,6 +11,12 @@ cd "$(dirname "$0")/.."
 TARGET=wasm32-unknown-unknown
 OUT=wasm
 
+# Start clean before any fallible step (compiler check, cargo build): a
+# build that fails early must not leave a removed backend's stale artifact
+# sitting in the publishable output directory.
+mkdir -p "$OUT"
+rm -f "$OUT"/*.wasm "$OUT"/.*.tmp.wasm 2>/dev/null || true
+
 if ! "${CC_wasm32_unknown_unknown:-clang}" --print-targets 2>/dev/null | grep -q wasm32; then
   echo "error: no wasm32-capable C compiler found for libzstd." >&2
   echo "       Enter the dev shell first: nix develop" >&2
@@ -22,11 +28,6 @@ cargo build --release --target "$TARGET" \
   -p gdelta-decode-wasm \
   -p zstd-compress-wasm \
   -p zstd-decompress-wasm
-
-mkdir -p "$OUT"
-# Start clean: a backend removed from the build must not survive into the
-# published package via a stale generated artifact.
-rm -f "$OUT"/*.wasm "$OUT"/.*.tmp.wasm 2>/dev/null || true
 
 # artifact name → intended export surface. Anything else (e.g. zstd-sys'
 # no_mangle shim helpers) is stripped from the export section; the export

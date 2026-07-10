@@ -294,3 +294,90 @@ describe("teardown survives cleanup traps", () => {
     await drain;
   });
 });
+
+describe("input resize failures route through fail()", () => {
+  type Mode = "old-free-throws" | "walloc-throws" | "copy-throws";
+
+  async function runResizeFailure(mode: Mode) {
+    const memory = new WebAssembly.Memory({ initial: 4 });
+    const wallocCalls: number[] = [];
+    const wfreeAttempts: Array<{ ptr: number; len: number }> = [];
+    const ctxFrees: number[] = [];
+    const allocated: Array<{ ptr: number; len: number }> = [];
+    let next = 1024;
+    const original = new Error(`ORIGINAL_${mode}`);
+
+    const exports: BaseWasmExports = {
+      memory,
+      walloc(len: number): number {
+        wallocCalls.push(len);
+        if (mode === "walloc-throws" && allocated.length === 2) {
+          throw original;
+        }
+        // In copy mode the third allocation (the resized input buffer) is
+        // placed past the end of memory so copyIn faults organically.
+        const ptr =
+          mode === "copy-throws" && allocated.length === 2 ? memory.buffer.byteLength : next;
+        next += len;
+        allocated.push({ ptr, len });
+        return ptr;
+      },
+      wfree(ptr: number, len: number): void {
+        wfreeAttempts.push({ ptr, len });
+        if (mode === "old-free-throws" && ptr === allocated[1]?.ptr) {
+          throw original;
+        }
+      },
+    };
+    const pair = codecPair(
+      fakeCodec(
+        { freed: [], allocFailAfter: Number.POSITIVE_INFINITY },
+        {
+          exports: () => Promise.resolve(exports),
+          create: () => 7,
+          step: (_e, _c, _p, inLen, inPos) => echo(inLen, inPos),
+          free: (_e, ctx) => {
+            ctxFrees.push(ctx);
+          },
+        },
+      ),
+    );
+
+    const writer = pair.writable.getWriter();
+    const reader = pair.readable.getReader();
+    // First write succeeds and is fully drained, establishing an input
+    // buffer that the oversized second write must replace.
+    const first = writer.write(new Uint8Array(OUT_CAP));
+    await reader.read();
+    await first;
+
+    const second = writer.write(new Uint8Array(OUT_CAP + 4_096));
+    second.catch(() => {});
+    const read = reader.read();
+    const guard = new Promise((resolve) => setTimeout(() => resolve("timeout"), 500));
+    return { second, read, guard, wallocCalls, wfreeAttempts, ctxFrees, allocated };
+  }
+
+  const expectations: Array<[Mode, RegExp]> = [
+    ["old-free-throws", /ORIGINAL_old-free-throws/],
+    ["walloc-throws", /ORIGINAL_walloc-throws/],
+    ["copy-throws", /out of bounds|Invalid typed array|outside the bounds|length/i],
+  ];
+
+  for (const [mode, message] of expectations) {
+    it(`${mode}: read and write both reject with the original error`, async () => {
+      const h = await runResizeFailure(mode);
+      await expect(Promise.race([h.read, h.guard])).rejects.toThrow(message);
+      await expect(Promise.race([h.second, h.guard])).rejects.toThrow(message);
+
+      // Context cleanup attempted exactly once.
+      expect(h.ctxFrees).toEqual([7]);
+      // Every successfully allocated buffer got exactly one free attempt,
+      // and no pointer whose free threw was retried.
+      for (const { ptr, len } of h.allocated) {
+        expect(h.wfreeAttempts.filter((a) => a.ptr === ptr && a.len === len)).toHaveLength(1);
+      }
+      expect(h.wfreeAttempts).toHaveLength(h.allocated.length);
+    });
+  }
+});

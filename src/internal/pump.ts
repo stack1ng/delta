@@ -370,20 +370,32 @@ export function codecPair<E extends BaseWasmExports>(
       }
       const e = exports as E;
       totalIn += chunk.length;
-      if (chunk.length > inCap) {
-        if (inPtr !== 0) {
-          e.wfree(inPtr, inCap);
+      // Ownership transition under fail(): the old pointer is claimed
+      // before its free (a throwing wfree is never retried), the new
+      // pointer is recorded before the copy (a throwing copyIn cannot
+      // strand it), and any exception tears the pair down instead of
+      // leaving the readable pending.
+      try {
+        if (chunk.length > inCap) {
+          const oldPtr = inPtr;
+          const oldCap = inCap;
           inPtr = 0;
+          inCap = 0;
+          if (oldPtr !== 0) {
+            e.wfree(oldPtr, oldCap);
+          }
+          const cap = Math.max(chunk.length, MIN_IN_CAP);
+          const ptr = e.walloc(cap);
+          if (ptr === 0) {
+            throw new Error("wasm memory exhausted");
+          }
+          inPtr = ptr;
+          inCap = cap;
         }
-        const cap = Math.max(chunk.length, MIN_IN_CAP);
-        const ptr = e.walloc(cap);
-        if (ptr === 0) {
-          throw fail(new Error("wasm memory exhausted"));
-        }
-        inCap = cap;
-        inPtr = ptr;
+        copyIn(e.memory, inPtr, chunk);
+      } catch (error) {
+        throw fail(error);
       }
-      copyIn(e.memory, inPtr, chunk);
       // Resolved by pull() once the codec has consumed and drained the chunk.
       await new Promise<void>((resolve, reject) => {
         pending = { len: chunk.length, pos: 0, resolve, reject };
