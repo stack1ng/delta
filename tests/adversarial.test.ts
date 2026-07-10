@@ -635,4 +635,45 @@ describe("gdelta decode source-reader ownership", () => {
     await expect(read).resolves.toMatchObject({ done: true });
     expect(sourceCancels).toBe(1);
   });
+
+  it("public cancel is a cleanup barrier for an in-flight abandonment", async () => {
+    let sourceCancels = 0;
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseGate = r;
+    });
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        // One oversized chunk trips maxPatchBytes inside decode's pull.
+        controller.enqueue(new Uint8Array(2048));
+      },
+      cancel() {
+        sourceCancels += 1;
+        return gate;
+      },
+    });
+    const reader = decodeDelta(new Uint8Array(4), source, { maxPatchBytes: 1024 }).getReader();
+    const read = reader.read();
+    read.catch(() => {});
+    // Let the pull failure claim the source reader and start awaiting the
+    // gated upstream cancel.
+    await new Promise((r) => setTimeout(r, 10));
+
+    let cancelSettled = false;
+    const cancelPromise = reader.cancel("consumer cancel").then(() => {
+      cancelSettled = true;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // While the upstream cancel is gated, public cancellation must not
+    // report completion and the source must remain locked.
+    expect(cancelSettled).toBe(false);
+    expect(source.locked).toBe(true);
+
+    releaseGate();
+    await cancelPromise;
+    expect(cancelSettled).toBe(true);
+    expect(source.locked).toBe(false);
+    expect(sourceCancels).toBe(1);
+    await expect(read).resolves.toMatchObject({ done: true });
+  });
 });

@@ -105,6 +105,8 @@ export function decodeDelta(
 
   let exports: GdeltaDecodeExports;
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  /** Settlement of a claimed reader's cancel + release, shared by all waiters. */
+  let abandonment: Promise<void> | undefined;
   let cancelled = false;
   let ctx = 0;
   let basePtr = 0;
@@ -152,21 +154,25 @@ export function decodeDelta(
     }
   }
 
-  async function abandonSource(reason: unknown): Promise<void> {
+  function abandonSource(reason: unknown): Promise<void> {
     // Claim the reader before awaiting (the local-ownership rule): a pull
-    // failure and a consumer cancel can both get here, and the second
-    // entrant must see no owned reader rather than re-cancel or touch a
-    // variable the first entrant clears mid-await.
+    // failure and a consumer cancel can both get here, and exactly one
+    // entrant performs exactly one upstream cancellation. The settlement is
+    // shared so every later caller awaits the same cleanup instead of
+    // mistaking the claimed (undefined) reader for a never-acquired one.
     const owned = reader;
     reader = undefined;
     if (owned !== undefined) {
-      try {
-        await owned.cancel(reason);
-      } catch {
-        // The source may already be errored; nothing left to release.
-      }
-      owned.releaseLock();
+      abandonment = (async () => {
+        try {
+          await owned.cancel(reason);
+        } catch {
+          // The source may already be errored; nothing left to release.
+        }
+        owned.releaseLock();
+      })();
     }
+    return abandonment ?? Promise.resolve();
   }
 
   return new ReadableStream<Uint8Array>({
@@ -278,7 +284,10 @@ export function decodeDelta(
     async cancel(reason) {
       cancelled = true;
       dispose();
-      if (reader !== undefined) {
+      if (reader !== undefined || abandonment !== undefined) {
+        // Claim the reader, or join an in-flight abandonment: public
+        // cancellation is a cleanup barrier that fulfills only once the
+        // upstream cancel has settled and the source lock is released.
         await abandonSource(reason);
       } else {
         // start() has not locked the source yet (and, seeing `cancelled`,
