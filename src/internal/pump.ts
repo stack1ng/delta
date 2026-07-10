@@ -20,7 +20,7 @@
  * in-flight writes settle, which would otherwise deadlock).
  */
 
-import { requireBytes } from "./bytes.js";
+import { requireBytes, validateByteCap } from "./bytes.js";
 import { type BaseWasmExports, copyIn, copyOut } from "./wasm.js";
 
 /** One bounded output chunk per step keeps queues and latency predictable. */
@@ -75,10 +75,7 @@ export function codecPair<E extends BaseWasmExports>(
   codec: PumpCodec<E>,
   options?: PumpOptions,
 ): ReadableWritablePair<Uint8Array, Uint8Array> {
-  const maxOutputBytes = options?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
-  if (Number.isNaN(maxOutputBytes) || maxOutputBytes < 0) {
-    throw new TypeError("maxOutputBytes must be a non-negative number");
-  }
+  const maxOutputBytes = validateByteCap(options?.maxOutputBytes, "maxOutputBytes");
 
   let exports: E | undefined;
   let ready: Promise<void> | undefined;
@@ -90,6 +87,7 @@ export function codecPair<E extends BaseWasmExports>(
   /** Input chunk already copied into wasm memory, awaiting consumption. */
   let pending: { len: number; pos: number; resolve(): void; reject(e: unknown): void } | undefined;
   let readableController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let writableController: WritableStreamDefaultController | undefined;
   let readableClosed = false;
   let inputClosed = false;
   let finished = false;
@@ -118,6 +116,9 @@ export function codecPair<E extends BaseWasmExports>(
         throw new Error(codec.createError);
       }
       outPtr = e.walloc(OUT_CAP);
+      if (outPtr === 0) {
+        throw new Error("wasm memory exhausted");
+      }
     });
     return ready;
   }
@@ -155,8 +156,11 @@ export function codecPair<E extends BaseWasmExports>(
       dispose();
       pending?.reject(failure);
       pending = undefined;
-      // No-op if the readable is already closed or cancelled.
+      // Error both stream objects (no-ops when already closed/errored):
+      // erroring the writable is what lets pipeTo observe a readable-side
+      // cancel and propagate it back to an idle upstream source.
       readableController?.error(failure);
+      writableController?.error(failure);
       signal();
     }
     return failure;
@@ -182,12 +186,25 @@ export function codecPair<E extends BaseWasmExports>(
         const e = exports as E;
 
         if (pending !== undefined) {
-          const packed = codec.step(e, ctx, inPtr, pending.len, pending.pos, outPtr, OUT_CAP);
+          const posBefore = pending.pos;
+          let packed: bigint;
+          try {
+            packed = codec.step(e, ctx, inPtr, pending.len, pending.pos, outPtr, OUT_CAP);
+          } catch (error) {
+            // A wasm trap must still tear down cleanly (free what remains
+            // freeable, reject the pending write, error both sides).
+            throw fail(error);
+          }
           if (packed < 0n) {
             throw fail(new Error(codec.stepError));
           }
           pending.pos = Number(packed >> 32n);
           const produced = Number(packed & 0xffffffffn);
+          if (produced === 0 && pending.pos === posBefore && pending.pos < pending.len) {
+            // A codec that consumes nothing and produces nothing on
+            // non-empty input would loop forever; treat it as an error.
+            throw fail(new Error(codec.stepError));
+          }
           countOutput(produced);
           if (pending.pos >= pending.len && produced < OUT_CAP) {
             // Chunk fully consumed and internal output drained: release the
@@ -248,13 +265,15 @@ export function codecPair<E extends BaseWasmExports>(
 
   const writable = new WritableStream<Uint8Array>({
     start(controller) {
+      writableController = controller;
       // The spec defers sink.abort until in-flight writes settle, but our
       // in-flight write settles only via pull() — observe the abort request
-      // directly so it cannot deadlock against an idle consumer.
+      // directly so it cannot deadlock against an idle consumer. Deferred a
+      // microtask so writer.abort()'s own bookkeeping settles first.
       controller.signal.addEventListener(
         "abort",
         () => {
-          fail(controller.signal.reason);
+          queueMicrotask(() => fail(controller.signal.reason));
         },
         { once: true },
       );
@@ -286,9 +305,15 @@ export function codecPair<E extends BaseWasmExports>(
       if (chunk.length > inCap) {
         if (inPtr !== 0) {
           e.wfree(inPtr, inCap);
+          inPtr = 0;
         }
-        inCap = Math.max(chunk.length, MIN_IN_CAP);
-        inPtr = e.walloc(inCap);
+        const cap = Math.max(chunk.length, MIN_IN_CAP);
+        const ptr = e.walloc(cap);
+        if (ptr === 0) {
+          throw fail(new Error("wasm memory exhausted"));
+        }
+        inCap = cap;
+        inPtr = ptr;
       }
       copyIn(e.memory, inPtr, chunk);
       // Resolved by pull() once the codec has consumed and drained the chunk.

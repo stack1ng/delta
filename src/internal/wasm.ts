@@ -19,13 +19,31 @@ export interface BaseWasmExports {
   wfree(ptr: number, len: number): void;
 }
 
+/**
+ * Compiles a Response, tolerating servers that omit the
+ * `application/wasm` MIME type (where `compileStreaming` refuses).
+ */
+async function compileResponse(response: Response): Promise<WebAssembly.Module> {
+  if (typeof WebAssembly.compileStreaming === "function") {
+    try {
+      return await WebAssembly.compileStreaming(response.clone());
+    } catch (error) {
+      if (!(error instanceof TypeError)) {
+        throw error;
+      }
+      // Wrong/missing MIME type: fall through to the buffered path.
+    }
+  }
+  return WebAssembly.compile(await response.arrayBuffer());
+}
+
 async function compileFrom(source: WasmSource | undefined, url: URL): Promise<WebAssembly.Module> {
   if (source instanceof WebAssembly.Module) {
     return source;
   }
   if (source !== undefined && !(source instanceof URL)) {
     if (source instanceof Response) {
-      return WebAssembly.compileStreaming(source);
+      return compileResponse(source);
     }
     return WebAssembly.compile(source);
   }
@@ -43,11 +61,7 @@ async function compileFrom(source: WasmSource | undefined, url: URL): Promise<We
     const bytes = await readFile(fileURLToPath(target));
     return WebAssembly.compile(bytes);
   }
-  if (typeof WebAssembly.compileStreaming === "function") {
-    return WebAssembly.compileStreaming(fetch(target));
-  }
-  const response = await fetch(target);
-  return WebAssembly.compile(await response.arrayBuffer());
+  return compileResponse(await fetch(target));
 }
 
 /** A lazily instantiated wasm module tied to one entrypoint. */
@@ -65,9 +79,17 @@ export function lazyWasm<E extends BaseWasmExports>(url: URL): LazyWasm<E> {
   let instantiated: Promise<E> | undefined;
 
   function instantiate(source?: WasmSource): Promise<E> {
-    return compileFrom(source, url)
+    const attempt = compileFrom(source, url)
       .then((module) => WebAssembly.instantiate(module, {}))
       .then((instance) => instance.exports as unknown as E);
+    // A failed load must not poison the entry forever: clear the cache so a
+    // later init()/first-use can retry (e.g. with a corrected source).
+    attempt.catch(() => {
+      if (instantiated === attempt) {
+        instantiated = undefined;
+      }
+    });
+    return attempt;
   }
 
   return {

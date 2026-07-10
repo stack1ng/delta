@@ -9,7 +9,7 @@
  * (with backpressure) straight out of wasm memory.
  */
 
-import { asBytes, collect } from "../internal/bytes.js";
+import { asBytes, type CancelableCollect, collect, collectCancelable } from "../internal/bytes.js";
 import {
   type BaseWasmExports,
   copyIn,
@@ -25,7 +25,7 @@ interface GdeltaEncodeExports extends BaseWasmExports {
   gdelta_result_free(handle: number): void;
 }
 
-const wasm = lazyWasm<GdeltaEncodeExports>(
+const wasm = /* @__PURE__ */ lazyWasm<GdeltaEncodeExports>(
   new URL("../../wasm/gdelta_encode.wasm", import.meta.url),
 );
 
@@ -57,6 +57,7 @@ export function encodeDelta(
 
   let exports: GdeltaEncodeExports;
   let cancelled = false;
+  let source: CancelableCollect | undefined;
   let handle = 0;
   let resultPtr = 0;
   let resultLen = 0;
@@ -69,10 +70,27 @@ export function encodeDelta(
     }
   }
 
+  function checkedAlloc(len: number): number {
+    if (len === 0) {
+      return 0;
+    }
+    const ptr = exports.walloc(len);
+    if (ptr === 0) {
+      throw new Error("wasm memory exhausted");
+    }
+    return ptr;
+  }
+
   return new ReadableStream<Uint8Array>({
     async start() {
-      const target =
-        newBytes instanceof ReadableStream ? await collect(newBytes) : (newBytes as Uint8Array);
+      let target: Uint8Array;
+      if (newBytes instanceof ReadableStream) {
+        source = collectCancelable(newBytes);
+        target = await source.promise;
+        source = undefined;
+      } else {
+        target = newBytes as Uint8Array;
+      }
 
       exports = await wasm.exports();
       if (cancelled) {
@@ -80,11 +98,11 @@ export function encodeDelta(
         // immediately, not after start settles): encode nothing.
         return;
       }
-      const basePtr = oldBytes.length > 0 ? exports.walloc(oldBytes.length) : 0;
+      const basePtr = checkedAlloc(oldBytes.length);
       if (basePtr !== 0) {
         copyIn(exports.memory, basePtr, oldBytes);
       }
-      const newPtr = target.length > 0 ? exports.walloc(target.length) : 0;
+      const newPtr = checkedAlloc(target.length);
       if (newPtr !== 0) {
         copyIn(exports.memory, newPtr, target);
       }
@@ -115,9 +133,11 @@ export function encodeDelta(
         controller.close();
       }
     },
-    cancel() {
+    async cancel(reason) {
       cancelled = true;
       dispose();
+      // Release a streamed `new` source that is still being buffered.
+      await source?.cancel(reason);
     },
   });
 }

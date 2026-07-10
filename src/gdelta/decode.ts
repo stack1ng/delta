@@ -12,7 +12,13 @@
  * reconstructed strictly on downstream demand.
  */
 
-import { asBytes, bytesToStream, collect, requireBytes } from "../internal/bytes.js";
+import {
+  asBytes,
+  bytesToStream,
+  collect,
+  requireBytes,
+  validateByteCap,
+} from "../internal/bytes.js";
 import {
   type BaseWasmExports,
   copyIn,
@@ -29,7 +35,7 @@ interface GdeltaDecodeExports extends BaseWasmExports {
   gdelta_decoder_free(ctx: number): void;
 }
 
-const wasm = lazyWasm<GdeltaDecodeExports>(
+const wasm = /* @__PURE__ */ lazyWasm<GdeltaDecodeExports>(
   new URL("../../wasm/gdelta_decode.wasm", import.meta.url),
 );
 
@@ -44,11 +50,17 @@ export function init(source?: WasmSource): Promise<void> {
 export interface DecodeDeltaOptions {
   /**
    * Rejects the stream once reconstructed output would exceed this many
-   * bytes. Also bounds the delta bytes buffered by the decoder (a valid
-   * delta needs at most ~2 bytes of input per output byte plus instruction
-   * overhead, so the input bound is derived as `2 * maxOutputBytes + 64Ki`).
+   * bytes. Output-only: valid patches can legitimately be much larger than
+   * their output (fragmented copies, zero-length instructions), so no input
+   * bound is derived from this — use {@link maxPatchBytes} for that.
    */
   maxOutputBytes?: number;
+  /**
+   * Rejects the stream once the delta itself exceeds this many bytes.
+   * This is the decoder's memory bound: it buffers the instruction block
+   * (≤ the patch size) plus not-yet-emitted literal bytes.
+   */
+  maxPatchBytes?: number;
 }
 
 const OUT_CAP = 64 * 1024;
@@ -80,12 +92,8 @@ export function decodeDelta(
   options?: DecodeDeltaOptions,
 ): ReadableStream<Uint8Array> {
   const oldBytes = asBytes(old);
-  const maxOutputBytes = options?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
-  if (Number.isNaN(maxOutputBytes) || maxOutputBytes < 0) {
-    throw new TypeError("maxOutputBytes must be a non-negative number");
-  }
-  const maxInputBytes =
-    maxOutputBytes === Number.POSITIVE_INFINITY ? maxOutputBytes : 2 * maxOutputBytes + 65536;
+  const maxOutputBytes = validateByteCap(options?.maxOutputBytes, "maxOutputBytes");
+  const maxPatchBytes = validateByteCap(options?.maxPatchBytes, "maxPatchBytes");
   const deltaStream = delta instanceof ReadableStream ? delta : bytesToStream(asBytes(delta));
 
   let exports: GdeltaDecodeExports;
@@ -147,11 +155,17 @@ export function decodeDelta(
         }
         baseLen = oldBytes.length;
         basePtr = baseLen > 0 ? exports.walloc(baseLen) : 0;
+        if (baseLen > 0 && basePtr === 0) {
+          throw new Error("wasm memory exhausted");
+        }
         if (basePtr !== 0) {
           copyIn(exports.memory, basePtr, oldBytes);
         }
         ctx = exports.gdelta_decoder_new(basePtr, baseLen);
         outPtr = exports.walloc(OUT_CAP);
+        if (outPtr === 0) {
+          throw new Error("wasm memory exhausted");
+        }
         reader = deltaStream.getReader();
       } catch (error) {
         dispose();
@@ -162,8 +176,13 @@ export function decodeDelta(
       try {
         for (;;) {
           // Emit at most one chunk per pull; the stream machinery calls
-          // pull again while downstream demand remains.
+          // pull again while downstream demand remains. Instructions parse
+          // lazily inside the decoder, so malformed/out-of-bounds units
+          // surface here as negative codes.
           const n = exports.gdelta_decoder_read(ctx, outPtr, OUT_CAP);
+          if (n < 0) {
+            throw decodeError(n);
+          }
           if (n > 0) {
             totalOut += n;
             if (totalOut > maxOutputBytes) {
@@ -196,17 +215,21 @@ export function decodeDelta(
             continue;
           }
           totalIn += value.length;
-          if (totalIn > maxInputBytes) {
-            throw new Error(
-              `delta exceeds the bound implied by maxOutputBytes (${maxOutputBytes})`,
-            );
+          if (totalIn > maxPatchBytes) {
+            throw new Error(`delta exceeds maxPatchBytes (${maxPatchBytes})`);
           }
           if (value.length > inCap) {
             if (inPtr !== 0) {
               exports.wfree(inPtr, inCap);
+              inPtr = 0;
             }
-            inCap = Math.max(value.length, MIN_IN_CAP);
-            inPtr = exports.walloc(inCap);
+            const cap = Math.max(value.length, MIN_IN_CAP);
+            const ptr = exports.walloc(cap);
+            if (ptr === 0) {
+              throw new Error("wasm memory exhausted");
+            }
+            inCap = cap;
+            inPtr = ptr;
           }
           copyIn(exports.memory, inPtr, value);
           const code = exports.gdelta_decoder_push(ctx, inPtr, value.length);

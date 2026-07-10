@@ -10,12 +10,12 @@
  * complete frame boundary, and empty input is rejected as invalid.
  */
 
-import { bytesToStream, collect } from "../internal/bytes.js";
+import { bytesToStream, collect, requireBytes, validateByteCap } from "../internal/bytes.js";
 import { codecPair, type PumpCodec } from "../internal/pump.js";
 import { type BaseWasmExports, lazyWasm, type WasmSource } from "../internal/wasm.js";
 
 interface ZstdDecompressExports extends BaseWasmExports {
-  zstd_decomp_new(): number;
+  zstd_decomp_new(windowLogMax: number): number;
   zstd_decomp_transform(
     ctx: number,
     inPtr: number,
@@ -28,7 +28,7 @@ interface ZstdDecompressExports extends BaseWasmExports {
   zstd_decomp_free(ctx: number): void;
 }
 
-const wasm = lazyWasm<ZstdDecompressExports>(
+const wasm = /* @__PURE__ */ lazyWasm<ZstdDecompressExports>(
   new URL("../../wasm/zstd_decompress.wasm", import.meta.url),
 );
 
@@ -47,6 +47,28 @@ export interface DecompressOptions {
    * expected size is known.
    */
   maxOutputBytes?: number;
+  /**
+   * Caps the frame history-window allocation: frames declaring a larger
+   * window fail decoding before the window buffer is ever allocated
+   * (libzstd's own ceiling is 128 MiB). The limit is enforced at
+   * power-of-two granularity, rounded up so no within-cap frame is ever
+   * falsely rejected — a 3 MiB cap therefore admits windows up to 4 MiB.
+   * Deliberately not derived from `maxOutputBytes`: streaming encoders —
+   * including this library's — declare the compression level's default
+   * window (e.g. 2 MiB at level 3) even for tiny payloads, so any implicit
+   * derivation would reject valid frames. Set it explicitly when consuming
+   * untrusted input.
+   */
+  maxWindowBytes?: number;
+}
+
+/** Smallest window log libzstd accepts is 10; 0 keeps the default limit. */
+function windowLogFor(maxWindowBytes: number): number {
+  if (maxWindowBytes === Number.POSITIVE_INFINITY) {
+    return 0;
+  }
+  const log = Math.ceil(Math.log2(Math.max(maxWindowBytes, 1024)));
+  return Math.min(Math.max(log, 10), 31);
 }
 
 /**
@@ -57,9 +79,10 @@ export interface DecompressOptions {
 export function decompressTransform(
   options?: DecompressOptions,
 ): ReadableWritablePair<Uint8Array, Uint8Array> {
+  const windowLogMax = windowLogFor(validateByteCap(options?.maxWindowBytes, "maxWindowBytes"));
   const codec: PumpCodec<ZstdDecompressExports> = {
     exports: () => wasm.exports(),
-    create: (e) => e.zstd_decomp_new(),
+    create: (e) => e.zstd_decomp_new(windowLogMax),
     createError: "zstd: failed to create decompression context",
     step: (e, ctx, inPtr, inLen, inPos, outPtr, outCap) =>
       e.zstd_decomp_transform(ctx, inPtr, inLen, inPos, outPtr, outCap),
@@ -81,5 +104,6 @@ export function decompressTransform(
  * One-shot convenience over {@link decompressTransform}.
  */
 export function decompress(bytes: Uint8Array, options?: DecompressOptions): Promise<Uint8Array> {
+  requireBytes(bytes);
   return collect(bytesToStream(bytes).pipeThrough(decompressTransform(options)));
 }

@@ -66,18 +66,26 @@ pub unsafe extern "C" fn gdelta_decoder_push(handle: u32, ptr: *const u8, len: u
     }
 }
 
-/// Drains decoded output into `out_ptr`. Returns bytes written (0 = drained).
+/// Drains decoded output into `out_ptr`. Returns bytes written (0 = drained),
+/// or a negative error code when a malformed/out-of-bounds instruction is
+/// reached (instructions parse lazily during emission).
 ///
 /// # Safety
 /// `handle` must be a live decoder; `out_ptr` must have `out_cap` writable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gdelta_decoder_read(handle: u32, out_ptr: *mut u8, out_cap: u32) -> u32 {
+pub unsafe extern "C" fn gdelta_decoder_read(handle: u32, out_ptr: *mut u8, out_cap: u32) -> i32 {
     let decoder = unsafe { &mut *(handle as *mut StreamDecoder<'static>) };
+    // Clamp so a successful read can never wrap into the negative error
+    // range, whatever capacity a caller passes.
+    let out_cap = out_cap.min(i32::MAX as u32);
     if out_cap == 0 {
         return 0;
     }
     let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, out_cap as usize) };
-    decoder.read(out) as u32
+    match decoder.read(out) {
+        Ok(n) => n as i32,
+        Err(err) => error_code(err),
+    }
 }
 
 /// Validates completion after the delta input ended and output was drained.

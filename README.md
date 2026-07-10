@@ -47,8 +47,13 @@ and `fetch`/explicit `init()`.
 | `@futuralabs/delta` | re-exports everything (`init` renamed per algo) | none until first call |
 
 Importing one entry never loads another entry's wasm — enforced by tests,
-not just documentation. The root import is convenient; the subpaths are the
-guaranteed-minimal bundles.
+not just documentation, including a real Rolldown bundle test: a leaf
+import emits exactly one wasm asset, a root import of one function
+references only that entry's asset (the module-level loaders are
+`@__PURE__`-annotated), and even the pipeline tree-shakes per direction —
+importing only `decodeFramed` drops both encode-side artifacts. Note that
+Rolldown ≤1.1 may still *copy* unreferenced `.wasm` files into the output
+directory at scan time; they are never loaded.
 
 ## Usage
 
@@ -117,14 +122,28 @@ const restored: ReadableStream<Uint8Array> = decodeDelta(old, patch);
 ## Robustness
 
 - Stream chunks must be `Uint8Array`s; anything else rejects with a
-  `TypeError` (buffer parameters accept `Uint8Array | ArrayBuffer`).
+  `TypeError` (buffer parameters accept `Uint8Array | ArrayBuffer`), and
+  option values are validated strictly.
 - Empty input is not a valid zstd stream and is rejected, as are truncated
-  frames, corrupt data, out-of-bounds copies, and trailing bytes.
-- Every decode direction takes `{ maxOutputBytes }` — a hard cap on
-  reconstructed output (and, derived from it, on buffered patch input) for
-  callers that know the expected size and want bombs rejected early:
-  `decompress`/`decompressTransform`, `decodeDelta`/`decodeDeltaBytes`,
-  and `decodeFramed`/`decodeFramedBytes` (which bounds every inner stage).
+  frames, corrupt data, out-of-bounds copies, trailing bytes, and
+  overflowing varints.
+- The gdelta decoder parses instructions lazily from the raw block, so
+  instruction-heavy patches cost their own byte length — no materialized
+  instruction list to amplify into.
+- Decode surfaces take three independent caps (independent because valid
+  inputs defeat any derivation between them — a correct patch may be far
+  larger than its output):
+  - `maxOutputBytes` — reconstructed bytes (`decompress`, `decodeDelta`,
+    `decodeFramed`);
+  - `maxPatchBytes` — the gdelta patch itself, i.e. decoder memory
+    (`decodeDelta`, `decodeFramed`);
+  - `maxWindowBytes` — the zstd history window, rejected before
+    allocation (`decompressTransform`, `decodeFramed`). Explicit rather
+    than derived: streaming encoders declare the level's default window
+    (2 MiB at level 3) even for tiny payloads.
+- Cancelling any stream — including before initialization finishes —
+  frees wasm resources and cancels/unlocks the upstream source; aborting a
+  writer with a write in flight settles rather than deadlocking.
 
 ## WASM loading in bundlers / Convex
 
@@ -154,6 +173,10 @@ bun install
 bun run ci         # build (wasm + ts) → typecheck → lint → rust tests → js tests
 bun run bench      # size/speed table
 ```
+
+`dist/` and `wasm/` are build products (gitignored); a `prepack` gate
+refuses to produce a package tarball from an unbuilt tree, so publishing
+always requires `bun run build` first.
 
 ## License
 

@@ -7,8 +7,8 @@
 use core::ffi::c_void;
 use std::alloc::{Layout, alloc, dealloc};
 use zstd_sys::{
-    ZSTD_DCtx, ZSTD_createDCtx, ZSTD_decompressStream, ZSTD_freeDCtx, ZSTD_inBuffer,
-    ZSTD_isError, ZSTD_outBuffer,
+    ZSTD_DCtx, ZSTD_DCtx_setParameter, ZSTD_createDCtx, ZSTD_dParameter, ZSTD_decompressStream,
+    ZSTD_freeDCtx, ZSTD_inBuffer, ZSTD_isError, ZSTD_outBuffer,
 };
 
 struct DecompCtx {
@@ -35,13 +35,26 @@ pub unsafe extern "C" fn wfree(ptr: *mut u8, len: u32) {
     unsafe { dealloc(ptr, Layout::from_size_align_unchecked(len as usize, 1)) }
 }
 
-/// Creates a decompression context. Returns 0 on failure.
+/// Creates a decompression context. `window_log_max` > 0 caps the frame
+/// window (frames requiring a larger history buffer are rejected instead of
+/// allocated); 0 keeps libzstd's default limit. Returns 0 on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn zstd_decomp_new() -> u32 {
+pub extern "C" fn zstd_decomp_new(window_log_max: i32) -> u32 {
     unsafe {
         let dctx = ZSTD_createDCtx();
         if dctx.is_null() {
             return 0;
+        }
+        if window_log_max > 0 {
+            let ret = ZSTD_DCtx_setParameter(
+                dctx,
+                ZSTD_dParameter::ZSTD_d_windowLogMax,
+                window_log_max,
+            );
+            if ZSTD_isError(ret) != 0 {
+                ZSTD_freeDCtx(dctx);
+                return 0;
+            }
         }
         Box::into_raw(Box::new(DecompCtx {
             dctx,

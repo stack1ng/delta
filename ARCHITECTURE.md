@@ -55,9 +55,12 @@ or re-buffers between those points.
 
 ## Backpressure
 
-Everything that produces output is pull-driven and emits at most one
-bounded (≤64 KiB) chunk per pull, so no path can run ahead of downstream
-demand:
+Everything that produces output is pull-driven and emits at most one chunk
+per pull, so no path can run ahead of downstream demand. Codec-produced
+output (zstd both directions, gdelta decode, the materialized encode
+results) is additionally bounded to ≤64 KiB per chunk; the framed RawFull
+passthrough forwards source chunks at whatever size the producer chose,
+since re-chunking a buffer that already exists would only add copies:
 
 - The zstd entries return a `{ readable, writable }` pair built on the
   shared pump in `src/internal/pump.ts` rather than a `TransformStream`.
@@ -73,12 +76,31 @@ demand:
   nothing left to emit, so copy-amplified output (one small COPY
   instruction expanding to megabytes from the base) is likewise
   reconstructed strictly on demand.
-- gdelta encode emits the materialized delta chunk-per-pull.
+- gdelta encode and framed encode emit their materialized result
+  chunk-per-pull (≤64 KiB each).
 
-For callers that know the expected size, every decode direction also takes
-`maxOutputBytes` — a hard cap on total reconstructed output (and a derived
-cap on buffered patch input) that turns resource-exhaustion inputs into
-prompt errors.
+## Resource bounds
+
+The decoder parses instructions lazily out of the raw block — a patch of
+millions of tiny instructions costs its own byte length, never a
+materialized instruction list — and overflowing varints are rejected
+rather than wrapped. On top of that, the decode surfaces take independent,
+caller-set caps (none is derived from another, because valid inputs break
+any such derivation — a correct patch can be several times larger than its
+output, or produce none at all):
+
+- `maxOutputBytes` — total reconstructed bytes
+  (`decompress`, `decodeDelta`, `decodeFramed`).
+- `maxPatchBytes` — the gdelta patch itself, which bounds the decoder's
+  instruction-block buffer (`decodeDelta`, `decodeFramed`).
+- `maxWindowBytes` — the zstd frame history window, checked before the
+  window buffer is allocated (`decompressTransform`, `decodeFramed`).
+  Deliberately explicit: streaming encoders declare the level's default
+  window (2 MiB at level 3) even for tiny payloads, so deriving this from
+  an output cap would reject valid frames.
+
+Uncapped decode buffers remain proportional to the input the caller
+chooses to feed, per the table above.
 
 ## WASM memory behavior
 

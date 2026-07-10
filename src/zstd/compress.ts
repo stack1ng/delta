@@ -9,7 +9,7 @@
  * never queues output the consumer has not asked for.
  */
 
-import { bytesToStream, collect } from "../internal/bytes.js";
+import { bytesToStream, collect, requireBytes } from "../internal/bytes.js";
 import { codecPair, type PumpCodec } from "../internal/pump.js";
 import { type BaseWasmExports, lazyWasm, type WasmSource } from "../internal/wasm.js";
 
@@ -27,7 +27,7 @@ interface ZstdCompressExports extends BaseWasmExports {
   zstd_comp_free(ctx: number): void;
 }
 
-const wasm = lazyWasm<ZstdCompressExports>(
+const wasm = /* @__PURE__ */ lazyWasm<ZstdCompressExports>(
   new URL("../../wasm/zstd_compress.wasm", import.meta.url),
 );
 
@@ -45,6 +45,16 @@ export interface CompressOptions {
   level?: number;
 }
 
+function validateLevel(value: number | undefined): number {
+  if (value === undefined) {
+    return 3;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new TypeError("level must be an integer");
+  }
+  return value;
+}
+
 /**
  * Creates a compression stream pair: uncompressed chunks in, one zstd frame
  * out. Use with `pipeThrough`, or drive `writable`/`readable` directly.
@@ -52,7 +62,7 @@ export interface CompressOptions {
 export function compressTransform(
   options?: CompressOptions,
 ): ReadableWritablePair<Uint8Array, Uint8Array> {
-  const level = options?.level ?? 3;
+  const level = validateLevel(options?.level);
   const codec: PumpCodec<ZstdCompressExports> = {
     exports: () => wasm.exports(),
     create: (e) => e.zstd_comp_new(level),
@@ -79,5 +89,6 @@ export function compressTransform(
  * One-shot convenience over {@link compressTransform}.
  */
 export function compress(bytes: Uint8Array, options?: CompressOptions): Promise<Uint8Array> {
+  requireBytes(bytes);
   return collect(bytesToStream(bytes).pipeThrough(compressTransform(options)));
 }

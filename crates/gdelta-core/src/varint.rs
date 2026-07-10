@@ -47,25 +47,36 @@ pub fn write_varint(buffer: &mut BufferStream, value: u64) {
     }
 }
 
+/// Result of parsing from a possibly-incomplete byte buffer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Parsed<T> {
+    /// More bytes are needed before a verdict is possible.
+    Incomplete,
+    /// The bytes can never form a valid value (overflow / over-long).
+    Invalid,
+    /// A value plus the number of bytes it consumed.
+    Done(T, usize),
+}
+
 /// Parses a varint from the front of `buf` without consuming it.
 ///
-/// Returns `None` when `buf` does not yet contain a complete varint, which
-/// makes this safe to call across chunk boundaries in the streaming decoder.
-pub fn parse_varint(buf: &[u8]) -> Option<(u64, usize)> {
+/// Safe to call across chunk boundaries in the streaming decoder:
+/// `Incomplete` means "wait for more input". Values that would overflow a
+/// `u64` (a tenth byte contributing more than the final bit, or an eleventh
+/// byte) are `Invalid` — previously such encodings silently wrapped.
+pub fn parse_varint(buf: &[u8]) -> Parsed<u64> {
     let mut value = 0u64;
-    let mut shift = 0u32;
     for (i, &byte) in buf.iter().enumerate() {
-        // 10 bytes bound any u64 varint; reject longer sequences.
-        if i >= 10 {
-            return None;
+        let payload = u64::from(byte & 0x7F);
+        if i == 9 && ((byte & 0x80) != 0 || payload > 1) {
+            return Parsed::Invalid;
         }
-        value |= u64::from(byte & 0x7F) << shift;
+        value |= payload << (7 * i as u32);
         if (byte & 0x80) == 0 {
-            return Some((value, i + 1));
+            return Parsed::Done(value, i + 1);
         }
-        shift += 7;
     }
-    None
+    Parsed::Incomplete
 }
 
 /// A delta instruction unit.
@@ -119,10 +130,10 @@ pub fn write_delta_unit(buffer: &mut BufferStream, unit: &DeltaUnit) {
 }
 
 /// Parses a delta unit from the front of `buf` without consuming it.
-///
-/// Returns `None` when `buf` does not yet contain a complete unit.
-pub fn parse_delta_unit(buf: &[u8]) -> Option<(DeltaUnit, usize)> {
-    let head_byte = *buf.first()?;
+pub fn parse_delta_unit(buf: &[u8]) -> Parsed<DeltaUnit> {
+    let Some(&head_byte) = buf.first() else {
+        return Parsed::Incomplete;
+    };
     let mut consumed = 1usize;
 
     let is_copy = (head_byte & 0x80) != 0;
@@ -130,27 +141,41 @@ pub fn parse_delta_unit(buf: &[u8]) -> Option<(DeltaUnit, usize)> {
     let mut length = u64::from(head_byte & 0x3F);
 
     if more {
-        let (remaining, n) = parse_varint(&buf[consumed..])?;
-        length |= remaining << HEAD_VARINT_BITS;
-        consumed += n;
+        match parse_varint(&buf[consumed..]) {
+            Parsed::Incomplete => return Parsed::Incomplete,
+            Parsed::Invalid => return Parsed::Invalid,
+            Parsed::Done(remaining, n) => {
+                // The head byte already holds the low 6 bits.
+                if remaining > (u64::MAX >> HEAD_VARINT_BITS) {
+                    return Parsed::Invalid;
+                }
+                length |= remaining << HEAD_VARINT_BITS;
+                consumed += n;
+            }
+        }
     }
 
     let offset = if is_copy {
-        let (offset, n) = parse_varint(&buf[consumed..])?;
-        consumed += n;
-        offset
+        match parse_varint(&buf[consumed..]) {
+            Parsed::Incomplete => return Parsed::Incomplete,
+            Parsed::Invalid => return Parsed::Invalid,
+            Parsed::Done(offset, n) => {
+                consumed += n;
+                offset
+            }
+        }
     } else {
         0
     };
 
-    Some((
+    Parsed::Done(
         DeltaUnit {
             is_copy,
             length,
             offset,
         },
         consumed,
-    ))
+    )
 }
 
 #[cfg(test)]
@@ -160,7 +185,9 @@ mod tests {
     fn roundtrip_unit(unit: DeltaUnit) {
         let mut buffer = BufferStream::with_capacity(20);
         write_delta_unit(&mut buffer, &unit);
-        let (decoded, consumed) = parse_delta_unit(buffer.as_slice()).unwrap();
+        let Parsed::Done(decoded, consumed) = parse_delta_unit(buffer.as_slice()) else {
+            panic!("unit did not parse");
+        };
         assert_eq!(decoded, unit);
         assert_eq!(consumed, buffer.len());
     }
@@ -170,17 +197,33 @@ mod tests {
         for value in [0u64, 1, 127, 128, 16383, 16384, 1 << 40, u64::MAX] {
             let mut buffer = BufferStream::with_capacity(10);
             write_varint(&mut buffer, value);
-            let (parsed, consumed) = parse_varint(buffer.as_slice()).unwrap();
-            assert_eq!(parsed, value);
-            assert_eq!(consumed, buffer.len());
+            assert_eq!(parse_varint(buffer.as_slice()), Parsed::Done(value, buffer.len()));
         }
     }
 
     #[test]
-    fn varint_incomplete_returns_none() {
-        assert_eq!(parse_varint(&[]), None);
-        assert_eq!(parse_varint(&[0x80]), None);
-        assert_eq!(parse_varint(&[0x80, 0x80]), None);
+    fn varint_incomplete() {
+        assert_eq!(parse_varint(&[]), Parsed::Incomplete);
+        assert_eq!(parse_varint(&[0x80]), Parsed::Incomplete);
+        assert_eq!(parse_varint(&[0x80, 0x80]), Parsed::Incomplete);
+    }
+
+    #[test]
+    fn varint_overflow_is_invalid() {
+        // Nine continuations alone are merely incomplete.
+        assert_eq!(parse_varint(&[0x80u8; 9]), Parsed::Incomplete);
+        // Tenth byte contributing more than the final u64 bit.
+        let mut nine_continuations = vec![0x80u8; 9];
+        nine_continuations.push(0x02);
+        assert_eq!(parse_varint(&nine_continuations), Parsed::Invalid);
+        // Eleven-byte encoding (tenth byte still has the continuation bit).
+        let mut ten_continuations = vec![0x80u8; 10];
+        ten_continuations.push(0x00);
+        assert_eq!(parse_varint(&ten_continuations), Parsed::Invalid);
+        // Exactly u64::MAX stays valid.
+        let mut max = vec![0xFFu8; 9];
+        max.push(0x01);
+        assert_eq!(parse_varint(&max), Parsed::Done(u64::MAX, 10));
     }
 
     #[test]
@@ -189,15 +232,25 @@ mod tests {
         roundtrip_unit(DeltaUnit::literal(250));
         roundtrip_unit(DeltaUnit::literal(100_000));
         roundtrip_unit(DeltaUnit::copy(0, 1));
+        roundtrip_unit(DeltaUnit::copy(u64::MAX >> 8, u64::MAX >> 8));
     }
 
     #[test]
-    fn delta_unit_incomplete_returns_none() {
+    fn delta_unit_incomplete() {
         let mut buffer = BufferStream::with_capacity(20);
         write_delta_unit(&mut buffer, &DeltaUnit::copy(100_000, 90_000));
         let bytes = buffer.as_slice();
         for cut in 0..bytes.len() {
-            assert_eq!(parse_delta_unit(&bytes[..cut]), None);
+            assert_eq!(parse_delta_unit(&bytes[..cut]), Parsed::Incomplete);
         }
+    }
+
+    #[test]
+    fn delta_unit_length_overflow_is_invalid() {
+        // Head byte with `more`; extension varint too large to shift by 6.
+        let mut bytes = vec![0x40u8]; // literal, more=1, low bits 0
+        bytes.extend_from_slice(&[0xFF; 9]);
+        bytes.push(0x01); // u64::MAX extension > (u64::MAX >> 6)
+        assert_eq!(parse_delta_unit(&bytes), Parsed::Invalid);
     }
 }

@@ -299,7 +299,7 @@ pub fn decode(delta: &[u8], base_data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut scratch = [0u8; 64 * 1024];
     loop {
-        let n = decoder.read(&mut scratch);
+        let n = decoder.read(&mut scratch)?;
         if n == 0 {
             break;
         }

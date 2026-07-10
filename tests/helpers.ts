@@ -123,3 +123,50 @@ export function concatBytes(...parts: readonly Uint8Array[]): Uint8Array {
   }
   return out;
 }
+
+/** Minimal gdelta patch writer for adversarial/interop fixtures. */
+export function writeVarint(out: number[], value: number): void {
+  let v = value;
+  for (;;) {
+    const byte = v & 0x7f;
+    v = Math.floor(v / 128);
+    if (v === 0) {
+      out.push(byte);
+      return;
+    }
+    out.push(byte | 0x80);
+  }
+}
+
+/** Appends one COPY instruction (head byte + varints). */
+export function writeCopy(out: number[], offset: number, length: number): void {
+  const head = 0x80 | (length >= 64 ? 0x40 : 0) | (length & 0x3f);
+  out.push(head);
+  if (length >= 64) {
+    writeVarint(out, Math.floor(length / 64));
+  }
+  writeVarint(out, offset);
+}
+
+/** Appends one LITERAL instruction head (data goes in the data region). */
+export function writeLiteral(out: number[], length: number): void {
+  const head = (length >= 64 ? 0x40 : 0) | (length & 0x3f);
+  out.push(head);
+  if (length >= 64) {
+    writeVarint(out, Math.floor(length / 64));
+  }
+}
+
+/** Assembles `varint(inst.length) || inst || data` into patch bytes. */
+export function buildPatch(
+  inst: readonly number[],
+  data: Uint8Array = new Uint8Array(0),
+): Uint8Array {
+  const header: number[] = [];
+  writeVarint(header, inst.length);
+  const patch = new Uint8Array(header.length + inst.length + data.length);
+  patch.set(header, 0);
+  patch.set(inst, header.length);
+  patch.set(data, header.length + inst.length);
+  return patch;
+}

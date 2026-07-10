@@ -9,18 +9,29 @@
 
 import { decodeDelta } from "../gdelta/decode.js";
 import { encodeDeltaBytes } from "../gdelta/encode.js";
-import { asBytes, bytesToStream, collect, concat, requireBytes } from "../internal/bytes.js";
+import {
+  asBytes,
+  bytesToStream,
+  type CancelableCollect,
+  collect,
+  collectCancelable,
+  requireBytes,
+  validateByteCap,
+} from "../internal/bytes.js";
 import { compress } from "../zstd/compress.js";
 import { decompressTransform } from "../zstd/decompress.js";
 
 /** Frame magic: ASCII "DF". */
-export const FRAME_MAGIC: readonly [number, number] = [0x44, 0x46];
+export const FRAME_MAGIC: readonly [number, number] = Object.freeze([0x44, 0x46]) as readonly [
+  number,
+  number,
+];
 
 /** Current frame version. */
 export const FRAME_VERSION = 0x01;
 
 /** Frame body encodings. */
-export const FrameAlgo = {
+export const FrameAlgo = Object.freeze({
   /** `new` bytes verbatim (tiny payloads where any encoding adds overhead). */
   RawFull: 0x00,
   /** Raw gdelta patch bytes. */
@@ -29,11 +40,12 @@ export const FrameAlgo = {
   FullZstd: 0x02,
   /** Zstd frame of the gdelta patch bytes — the primary product path. */
   GdeltaZstd: 0x03,
-} as const;
+} as const);
 
 export type FrameAlgo = (typeof FrameAlgo)[keyof typeof FrameAlgo];
 
 const HEADER_LEN = 4;
+const CHUNK = 64 * 1024;
 
 export interface FramedEncodeOptions {
   /** Zstd level for the compressed candidates (default 3). */
@@ -50,11 +62,22 @@ export interface FramedEncodeOptions {
 export interface FramedDecodeOptions {
   /**
    * Rejects the stream once reconstructed output would exceed this many
-   * bytes. Intermediate stages get proportional bounds (a valid gdelta
-   * patch needs at most ~2 bytes per output byte plus overhead), so memory
-   * stays bounded even for adversarial frames.
+   * bytes. Output-only — it does not bound the patch size or the zstd
+   * window; those are {@link maxPatchBytes} and {@link maxWindowBytes}.
    */
   maxOutputBytes?: number;
+  /**
+   * Rejects the stream once the (decompressed) gdelta patch exceeds this
+   * many bytes — the memory bound for the delta stages. Valid patches can
+   * legitimately exceed their output size, so this is a separate knob
+   * rather than being derived from `maxOutputBytes`.
+   */
+  maxPatchBytes?: number;
+  /**
+   * Caps the zstd history-window allocation of the compressed stages; see
+   * `DecompressOptions.maxWindowBytes` for why this is explicit.
+   */
+  maxWindowBytes?: number;
 }
 
 function frame(algo: FrameAlgo, body: Uint8Array): Uint8Array {
@@ -73,20 +96,28 @@ function frame(algo: FrameAlgo, body: Uint8Array): Uint8Array {
  * Both inputs end up fully buffered — gdelta encode inherently needs full
  * random access to both, and candidate selection needs candidate sizes — so
  * this facade trades streaming input for the smallest wire size. The result
- * streams out.
+ * streams out in bounded (≤64 KiB) chunks.
  */
 export function encodeFramed(
   old: Uint8Array | ArrayBuffer,
   newBytes: Uint8Array | ArrayBuffer | ReadableStream<Uint8Array>,
   options?: FramedEncodeOptions,
 ): ReadableStream<Uint8Array> {
-  let inner: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let cancelled = false;
+  let source: CancelableCollect | undefined;
+  let framed: Uint8Array | undefined;
+  let offset = 0;
 
   return new ReadableStream<Uint8Array>({
     async start() {
-      const target =
-        newBytes instanceof ReadableStream ? await collect(newBytes) : asBytes(newBytes);
+      let target: Uint8Array;
+      if (newBytes instanceof ReadableStream) {
+        source = collectCancelable(newBytes);
+        target = await source.promise;
+        source = undefined;
+      } else {
+        target = asBytes(newBytes);
+      }
       const compressOptions = { level: options?.zstdLevel ?? 3 };
       if (cancelled) {
         return;
@@ -115,20 +146,26 @@ export function encodeFramed(
       }
 
       if (!cancelled) {
-        inner = bytesToStream(frame(algo, body)).getReader();
+        framed = frame(algo, body);
       }
     },
-    async pull(controller) {
-      const { done, value } = await (inner as ReadableStreamDefaultReader<Uint8Array>).read();
-      if (done) {
+    pull(controller) {
+      const bytes = framed as Uint8Array;
+      if (offset >= bytes.length) {
         controller.close();
-      } else {
-        controller.enqueue(value);
+        return;
+      }
+      controller.enqueue(bytes.subarray(offset, offset + CHUNK));
+      offset += CHUNK;
+      if (offset >= bytes.length) {
+        controller.close();
       }
     },
-    cancel(reason) {
+    async cancel(reason) {
       cancelled = true;
-      return inner?.cancel(reason);
+      framed = undefined;
+      // Release a streamed `new` source that is still being buffered.
+      await source?.cancel(reason);
     },
   });
 }
@@ -138,26 +175,35 @@ interface SplitStream {
   rest: ReadableStream<Uint8Array>;
 }
 
+/**
+ * Splits the first `n` bytes off a reader without copying the remainder:
+ * the prefix is assembled from at most `n` bytes, the tail of the crossing
+ * chunk is re-emitted as a view, and the reader lock is released when the
+ * source ends (or cancelled with it).
+ */
 async function readPrefix(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   n: number,
 ): Promise<SplitStream> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (total < n) {
+  const prefix = new Uint8Array(n);
+  let filled = 0;
+  let leftover: Uint8Array | undefined;
+  while (filled < n) {
     const { done, value } = await reader.read();
     if (done) {
       throw new Error(`delta-frame: input shorter than ${n}-byte header`);
     }
     requireBytes(value);
-    chunks.push(value);
-    total += value.length;
+    const take = Math.min(n - filled, value.length);
+    prefix.set(value.subarray(0, take), filled);
+    filled += take;
+    if (take < value.length) {
+      leftover = value.subarray(take);
+    }
   }
-  const all = concat(chunks, total);
-  const leftover = all.subarray(n);
   const rest = new ReadableStream<Uint8Array>({
     start(controller) {
-      if (leftover.length > 0) {
+      if (leftover !== undefined && leftover.length > 0) {
         controller.enqueue(leftover);
       }
     },
@@ -165,15 +211,17 @@ async function readPrefix(
       const { done, value } = await reader.read();
       if (done) {
         controller.close();
+        reader.releaseLock();
       } else {
         controller.enqueue(value);
       }
     },
-    cancel(reason) {
-      return reader.cancel(reason);
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => {});
+      reader.releaseLock();
     },
   });
-  return { prefix: all.subarray(0, n), rest };
+  return { prefix, rest };
 }
 
 /**
@@ -187,15 +235,17 @@ export function decodeFramed(
   options?: FramedDecodeOptions,
 ): ReadableStream<Uint8Array> {
   const framedStream = framed instanceof ReadableStream ? framed : bytesToStream(asBytes(framed));
-  const maxOutputBytes = options?.maxOutputBytes ?? Number.POSITIVE_INFINITY;
-  if (Number.isNaN(maxOutputBytes) || maxOutputBytes < 0) {
-    throw new TypeError("maxOutputBytes must be a non-negative number");
-  }
-  const capped = maxOutputBytes !== Number.POSITIVE_INFINITY;
-  // A valid gdelta patch is bounded by ~2 bytes per output byte plus
-  // instruction overhead; the intermediate stages get that much headroom.
-  const deltaCap = { maxOutputBytes: 2 * maxOutputBytes + 65536 };
-  const outputCap = { maxOutputBytes };
+  const maxOutputBytes = validateByteCap(options?.maxOutputBytes, "maxOutputBytes");
+  const maxPatchBytes = validateByteCap(options?.maxPatchBytes, "maxPatchBytes");
+  const maxWindowBytes = validateByteCap(options?.maxWindowBytes, "maxWindowBytes");
+  const outputCapped = maxOutputBytes !== Number.POSITIVE_INFINITY;
+  const patchCapped = maxPatchBytes !== Number.POSITIVE_INFINITY;
+  const windowCapped = maxWindowBytes !== Number.POSITIVE_INFINITY;
+  const deltaOptions = {
+    ...(outputCapped && { maxOutputBytes }),
+    ...(patchCapped && { maxPatchBytes }),
+  };
+  const windowOption = windowCapped ? { maxWindowBytes } : undefined;
 
   let sourceReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let inner: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -225,18 +275,32 @@ export function decodeFramed(
             inner = rest.getReader();
             break;
           case FrameAlgo.GdeltaRaw:
-            inner = decodeDelta(old, rest, capped ? outputCap : undefined).getReader();
+            inner = decodeDelta(old, rest, deltaOptions).getReader();
             break;
           case FrameAlgo.FullZstd:
             inner = rest
-              .pipeThrough(decompressTransform(capped ? outputCap : undefined))
+              .pipeThrough(
+                decompressTransform(
+                  outputCapped || windowCapped
+                    ? { ...(outputCapped && { maxOutputBytes }), ...windowOption }
+                    : undefined,
+                ),
+              )
               .getReader();
             break;
           case FrameAlgo.GdeltaZstd:
+            // The intermediate decompression yields the gdelta patch, so
+            // the patch cap is the right bound for that stage.
             inner = decodeDelta(
               old,
-              rest.pipeThrough(decompressTransform(capped ? deltaCap : undefined)),
-              capped ? outputCap : undefined,
+              rest.pipeThrough(
+                decompressTransform(
+                  patchCapped || windowCapped
+                    ? { ...(patchCapped && { maxOutputBytes: maxPatchBytes }), ...windowOption }
+                    : undefined,
+                ),
+              ),
+              deltaOptions,
             ).getReader();
             break;
           default:
@@ -248,6 +312,7 @@ export function decodeFramed(
         } catch {
           // The source may already be errored.
         }
+        sourceReader.releaseLock();
         throw error;
       }
     },
