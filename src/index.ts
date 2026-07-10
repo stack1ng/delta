@@ -4,7 +4,7 @@
  * All wasm loading is lazy (first call), so importing this module loads no
  * wasm by itself; with a tree-shaking bundler unused entries disappear
  * entirely. For guaranteed-minimal bundles import the subpaths directly,
- * e.g. `@pyro/delta/gdelta/decode`.
+ * e.g. `@stack1ng/delta/gdelta/decode`.
  */
 
 export {

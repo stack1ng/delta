@@ -1,6 +1,6 @@
 # Frame format
 
-Versioned wire frame produced by `@pyro/delta/pipeline`. All multi-byte
+Versioned wire frame produced by `@stack1ng/delta/pipeline`. All multi-byte
 concepts are single bytes here; there is no endianness to worry about.
 
 ## Layout (version 1)

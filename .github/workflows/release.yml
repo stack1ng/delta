@@ -1,7 +1,7 @@
 name: Release to npm
 
 # Token-free npm Trusted Publishing. The package's npm publisher must match
-# stack1ng/pyro-delta, release.yml, and the Production environment exactly.
+# stack1ng/delta, release.yml, and the Production environment exactly.
 # See PUBLISHING.md for bootstrap and one-time external configuration.
 
 on:

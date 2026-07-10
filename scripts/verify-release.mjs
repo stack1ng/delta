@@ -21,7 +21,7 @@ const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 const packResult = JSON.parse(readFileSync(packManifest, "utf8"));
 // npm 11 returns an array, while npm 12 keys the result by package name.
 const packed = Array.isArray(packResult) ? packResult[0] : packResult[pkg.name];
-const expectedRepository = "git+https://github.com/stack1ng/pyro-delta.git";
+const expectedRepository = "git+https://github.com/stack1ng/delta.git";
 const expectedWasm = [
   "wasm/gdelta_decode.wasm",
   "wasm/gdelta_encode.wasm",
@@ -39,7 +39,7 @@ if (refType !== "tag") {
 if (refName !== `v${pkg.version}`) {
   throw new Error(`tag ${refName} does not match package version v${pkg.version}`);
 }
-if (pkg.name !== "@pyro/delta" || packed.name !== pkg.name) {
+if (pkg.name !== "@stack1ng/delta" || packed.name !== pkg.name) {
   throw new Error(`unexpected package name: source=${pkg.name}, packed=${packed.name}`);
 }
 if (packed.version !== pkg.version) {

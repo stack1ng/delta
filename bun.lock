@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@pyro/delta",
+      "name": "@stack1ng/delta",
       "devDependencies": {
         "@biomejs/biome": "^2.5.3",
         "@types/node": "^26.1.1",
