@@ -250,7 +250,13 @@ describe("strict options and inputs", () => {
 describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("wasm loader", () => {
   it("accepts a Response without the wasm MIME type", async () => {
     const bytes = await readFile(join(wasmDir, "gdelta_decode.wasm"));
-    const loader = lazyWasm(new URL("file:///nonexistent.wasm"));
+    const loader = lazyWasm(new URL("file:///nonexistent.wasm"), [
+      "gdelta_decoder_new",
+      "gdelta_decoder_push",
+      "gdelta_decoder_read",
+      "gdelta_decoder_finish",
+      "gdelta_decoder_free",
+    ]);
     const response = new Response(bytes, {
       headers: { "Content-Type": "application/octet-stream" },
     });
@@ -258,7 +264,13 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("wasm loader",
   });
 
   it("retries after a failed initialization instead of caching the error", async () => {
-    const loader = lazyWasm(new URL("file:///nonexistent.wasm"));
+    const loader = lazyWasm(new URL("file:///nonexistent.wasm"), [
+      "gdelta_decoder_new",
+      "gdelta_decoder_push",
+      "gdelta_decoder_read",
+      "gdelta_decoder_finish",
+      "gdelta_decoder_free",
+    ]);
     await expect(loader.init(new Uint8Array([1, 2, 3]))).rejects.toThrow();
     const good = await readFile(join(wasmDir, "gdelta_decode.wasm"));
     await expect(loader.init(good)).resolves.toBeUndefined();
@@ -399,7 +411,13 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("minimal runti
     // biome-ignore lint/suspicious/noExplicitAny: deliberate global surgery
     (globalThis as any).Response = undefined;
     try {
-      const loader = lazyWasm(new URL("file:///nonexistent.wasm"));
+      const loader = lazyWasm(new URL("file:///nonexistent.wasm"), [
+        "gdelta_decoder_new",
+        "gdelta_decoder_push",
+        "gdelta_decoder_read",
+        "gdelta_decoder_finish",
+        "gdelta_decoder_free",
+      ]);
       await expect(loader.init(new Uint8Array(bytes))).resolves.toBeUndefined();
     } finally {
       globalThis.Response = originalResponse;
@@ -437,3 +455,43 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))(
     });
   },
 );
+
+describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("init() ABI validation", () => {
+  const entries: Array<[string, string, string]> = [
+    ["gdelta/encode.js", "gdelta_encode.wasm", "gdelta_decode.wasm"],
+    ["gdelta/decode.js", "gdelta_decode.wasm", "zstd_compress.wasm"],
+    ["zstd/compress.js", "zstd_compress.wasm", "zstd_decompress.wasm"],
+    ["zstd/decompress.js", "zstd_decompress.wasm", "gdelta_encode.wasm"],
+  ];
+
+  for (const [entry, correct, wrong] of entries) {
+    it(`${entry} rejects a wrong-direction module, then a correct retry works`, async () => {
+      const dist = join(import.meta.dirname, "..", "dist", entry);
+      const mod = (await import(`${pathToFileURL(dist).href}?abi-${entry}`)) as {
+        init(source: WebAssembly.Module): Promise<void>;
+      };
+      const wrongModule = await WebAssembly.compile(await readFile(join(wasmDir, wrong)));
+      await expect(mod.init(wrongModule)).rejects.toThrow(/missing required exports/);
+      // The bad instance must not be cached: a correct init now succeeds.
+      const correctModule = await WebAssembly.compile(await readFile(join(wasmDir, correct)));
+      await expect(mod.init(correctModule)).resolves.toBeUndefined();
+    });
+  }
+
+  it("a validated entry operates byte-exactly after the failed init", async () => {
+    const dist = join(import.meta.dirname, "..", "dist", "zstd", "decompress.js");
+    const mod = (await import(`${pathToFileURL(dist).href}?abi-op`)) as {
+      init(source: WebAssembly.Module): Promise<void>;
+      decompress(bytes: Uint8Array): Promise<Uint8Array>;
+    };
+    const wrongModule = await WebAssembly.compile(
+      await readFile(join(wasmDir, "gdelta_decode.wasm")),
+    );
+    await expect(mod.init(wrongModule)).rejects.toThrow(/missing required exports/);
+    await mod.init(
+      await WebAssembly.compile(await readFile(join(wasmDir, "zstd_decompress.wasm"))),
+    );
+    const input = jsonSnapshot(700, 100);
+    expect(await mod.decompress(await compress(input))).toEqual(input);
+  });
+});

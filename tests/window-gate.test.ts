@@ -134,3 +134,110 @@ describe("cap range contract", () => {
     ).rejects.toThrow(/truncated/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Known-content-size fixtures (zstd CLI): a whole frame arriving in one call
+// would take libzstd's single-pass shortcut, which skips the streaming
+// window check — the wrapper primes each capped frame's first byte to force
+// streaming mode. The cap must behave identically for every chunking.
+
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const zstdCli = (() => {
+  try {
+    execFileSync("zstd", ["--version"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** Compresses via the CLI from a file, so content size is known (wlog=20 ⇒ 1 MiB window). */
+function cliKnownSizeFrame(content: Uint8Array): Uint8Array {
+  const scratch = mkdtempSync(join(tmpdir(), "delta-cli-"));
+  try {
+    const input = join(scratch, "input.bin");
+    writeFileSync(input, content);
+    execFileSync("zstd", ["-3", "--zstd=wlog=20", "-f", "-o", join(scratch, "out.zst"), input], {
+      stdio: "pipe",
+    });
+    return new Uint8Array(readFileSync(join(scratch, "out.zst")));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+async function decodeChunked(
+  frame: Uint8Array,
+  cap: number,
+  chunkSize: number,
+): Promise<Uint8Array> {
+  return collectStream(
+    streamOf(chunked(frame, chunkSize)).pipeThrough(decompressTransform({ maxWindowBytes: cap })),
+  );
+}
+
+describe.skipIf(!zstdCli)("known-content-size frames (single-pass shortcut defeated)", () => {
+  const MIB = 1024 * 1024;
+
+  // libzstd's operative window for a known-size frame is
+  // min(declaredWindow, contentSize) — the true memory requirement — so
+  // the exact boundary sits at the content size for these fixtures. The
+  // 65,536/65,537 cases straddle the wrapper's 64 KiB output-buffer
+  // boundary, where the single-pass shortcut condition flips.
+  for (const contentBytes of [1025, 65536, 65537]) {
+    it(`${contentBytes}B content: the cap boundary is chunk-invariant`, async () => {
+      const content = new Uint8Array(contentBytes).fill(0x41);
+      const frame = cliKnownSizeFrame(content);
+      const boundary = Math.min(contentBytes, MIB);
+
+      // One byte under the operative window must reject whether the frame
+      // arrives whole, split anywhere in the header, or byte-fragmented.
+      await expect(decompress(frame, { maxWindowBytes: boundary - 1 })).rejects.toThrow(
+        /maxWindowBytes/,
+      );
+      for (let split = 1; split < Math.min(frame.length, 24); split++) {
+        await expect(decodeChunked(frame, boundary - 1, split)).rejects.toThrow(/maxWindowBytes/);
+      }
+
+      // At the exact boundary it must decode byte-exactly in the same forms.
+      expect(await decompress(frame, { maxWindowBytes: boundary })).toEqual(content);
+      expect(await decodeChunked(frame, boundary, 1)).toEqual(content);
+      expect(await decodeChunked(frame, boundary, 7)).toEqual(content);
+    });
+  }
+
+  it("known-zero-content frame decodes under a cap in all chunkings", async () => {
+    const frame = cliKnownSizeFrame(new Uint8Array(0));
+    expect((await decompress(frame, { maxWindowBytes: 2 * MIB })).length).toBe(0);
+    expect((await decodeChunked(frame, 2 * MIB, 1)).length).toBe(0);
+  });
+
+  it("truncated known-size frame still reports truncation under a cap", async () => {
+    const frame = cliKnownSizeFrame(new Uint8Array(4096).fill(0x42));
+    await expect(
+      decompress(frame.subarray(0, frame.length - 2), { maxWindowBytes: 2 * MIB }),
+    ).rejects.toThrow(/truncated/);
+  });
+
+  it("capped many-tiny-frame decoding stays correct and roughly linear", async () => {
+    const one = await compress(new Uint8Array([0x7b]));
+    const joined = concatBytes(...Array.from({ length: 10_000 }, () => one));
+
+    const t0 = performance.now();
+    const uncapped = await decompress(joined);
+    const uncappedMs = performance.now() - t0;
+    const t1 = performance.now();
+    const capped = await decompress(joined, { maxWindowBytes: 2 * MIB });
+    const cappedMs = performance.now() - t1;
+
+    expect(uncapped.length).toBe(10_000);
+    expect(capped).toEqual(uncapped);
+    // One extra 1-byte priming call per frame: small constant factor, not a
+    // blow-up. Generous bound to stay timing-robust in CI.
+    expect(cappedMs).toBeLessThan(Math.max(uncappedMs * 5, 250));
+  });
+});

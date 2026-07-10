@@ -30,6 +30,7 @@ interface ZstdDecompressExports extends BaseWasmExports {
 
 const wasm = /* @__PURE__ */ lazyWasm<ZstdDecompressExports>(
   new URL("../../wasm/zstd_decompress.wasm", import.meta.url),
+  ["zstd_decomp_new", "zstd_decomp_transform", "zstd_decomp_done", "zstd_decomp_free"],
 );
 
 /**

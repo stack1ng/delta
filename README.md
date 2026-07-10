@@ -148,8 +148,12 @@ const restored: ReadableStream<Uint8Array> = decodeDelta(old, patch);
     encoders declare the level's default window (2 MiB at level 3) even
     for tiny payloads.
 - Cancelling any stream — including before initialization finishes —
-  frees wasm resources and cancels/unlocks the upstream source; aborting a
-  writer with a write in flight settles rather than deadlocking.
+  frees wasm resources and cancels/unlocks the upstream source. Aborting a
+  writer with a write in flight settles immediately on runtimes whose
+  `WritableStreamDefaultController` has `signal` (Node ≥ 20); on runtimes
+  without it (Bun ≤ 1.3) the abort settles once the coupled readable is
+  next pulled or cancelled — cancel the readable too when tearing down
+  there. All ordinary operations work on both.
 
 ## WASM loading in bundlers / Convex
 

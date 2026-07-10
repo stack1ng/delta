@@ -24,12 +24,18 @@ struct DecompCtx {
     dctx: *mut ZSTD_DCtx,
     last_ret: usize,
     saw_input: bool,
+    /// A window limit is active: each frame's first byte is fed separately
+    /// (see `zstd_decomp_transform`) so the limit applies to every frame.
+    window_limited: bool,
 }
 
 /// Allocates `len` bytes (1-aligned) inside wasm memory. Returns null when
 /// the size is unrepresentable or memory is exhausted.
 #[unsafe(no_mangle)]
 pub extern "C" fn walloc(len: u32) -> *mut u8 {
+    if len == 0 {
+        return core::ptr::null_mut();
+    }
     match Layout::from_size_align(len as usize, 1) {
         Ok(layout) => unsafe { alloc(layout) },
         Err(_) => core::ptr::null_mut(),
@@ -42,6 +48,9 @@ pub extern "C" fn walloc(len: u32) -> *mut u8 {
 /// `ptr`/`len` must come from a matching `walloc` call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wfree(ptr: *mut u8, len: u32) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
     if let Ok(layout) = Layout::from_size_align(len as usize, 1) {
         unsafe { dealloc(ptr, layout) };
     }
@@ -79,6 +88,7 @@ pub extern "C" fn zstd_decomp_new(window_limit: u64) -> u32 {
             dctx,
             last_ret: 0,
             saw_input: false,
+            window_limited: window_limit > 0,
         })) as u32
     }
 }
@@ -104,6 +114,15 @@ pub unsafe extern "C" fn zstd_decomp_transform(
         size: in_len as usize,
         pos: in_pos as usize,
     };
+    // With a window limit, feed each frame's first byte in its own call
+    // (`last_ret == 0` marks the initial state and every complete-frame
+    // boundary). A whole known-size frame arriving in one call would
+    // otherwise take libzstd's single-pass shortcut, which skips the
+    // streaming `maxWindowSize` check; one primed byte forces streaming
+    // mode without parsing or staging anything.
+    if ctx.window_limited && ctx.last_ret == 0 && input.pos < input.size {
+        input.size = input.pos + 1;
+    }
     let mut output = ZSTD_outBuffer {
         dst: out_ptr as *mut c_void,
         size: out_cap as usize,

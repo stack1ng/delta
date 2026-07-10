@@ -52,3 +52,21 @@ describe.skipIf(!anyBuilt)("wasm export surface", () => {
     });
   }
 });
+
+describe.skipIf(!anyBuilt)("allocator zero-size contract", () => {
+  for (const [artifact] of surfaces) {
+    it(`${artifact}: walloc(0) returns 0 and wfree(0, 0) is a no-op`, async () => {
+      const module = await WebAssembly.compile(await readFile(join(wasmDir, artifact)));
+      const { exports } = (await WebAssembly.instantiate(module, {})) as unknown as {
+        exports: { walloc(len: number): number; wfree(ptr: number, len: number): void };
+      };
+      expect(exports.walloc(0)).toBe(0);
+      expect(() => exports.wfree(0, 0)).not.toThrow();
+      expect(() => exports.wfree(0, 16)).not.toThrow();
+      // Non-zero allocation still works and frees cleanly.
+      const ptr = exports.walloc(64);
+      expect(ptr).not.toBe(0);
+      expect(() => exports.wfree(ptr, 64)).not.toThrow();
+    });
+  }
+});

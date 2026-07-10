@@ -10,6 +10,9 @@ use std::alloc::{alloc, dealloc, Layout};
 /// the size is unrepresentable or memory is exhausted.
 #[unsafe(no_mangle)]
 pub extern "C" fn walloc(len: u32) -> *mut u8 {
+    if len == 0 {
+        return core::ptr::null_mut();
+    }
     match Layout::from_size_align(len as usize, 1) {
         Ok(layout) => unsafe { alloc(layout) },
         Err(_) => core::ptr::null_mut(),
@@ -22,6 +25,9 @@ pub extern "C" fn walloc(len: u32) -> *mut u8 {
 /// `ptr`/`len` must come from a matching `walloc` call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wfree(ptr: *mut u8, len: u32) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
     if let Ok(layout) = Layout::from_size_align(len as usize, 1) {
         unsafe { dealloc(ptr, layout) };
     }

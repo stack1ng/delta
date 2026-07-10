@@ -24,6 +24,9 @@ cargo build --release --target "$TARGET" \
   -p zstd-decompress-wasm
 
 mkdir -p "$OUT"
+# Start clean: a backend removed from the build must not survive into the
+# published package via a stale generated artifact.
+rm -f "$OUT"/*.wasm "$OUT"/.*.tmp.wasm 2>/dev/null || true
 
 # artifact name → intended export surface. Anything else (e.g. zstd-sys'
 # no_mangle shim helpers) is stripped from the export section; the export

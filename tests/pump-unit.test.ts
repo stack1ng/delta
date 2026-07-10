@@ -226,3 +226,71 @@ describe("pump ABI trust boundary", () => {
     await expect(reading).rejects.toThrow(/step failed/);
   });
 });
+
+describe("teardown survives cleanup traps", () => {
+  it("settles read and write with the original error when frees throw", async () => {
+    const state: FakeState = { freed: [], allocFailAfter: Number.POSITIVE_INFINITY };
+    const exportsWithTrap = {
+      ...fakeExports(state),
+      wfree() {
+        throw new Error("wfree trapped");
+      },
+    };
+    const pair = codecPair(
+      fakeCodec(state, {
+        exports: () => Promise.resolve(exportsWithTrap),
+        step: () => -1n, // normal step error triggers fail()
+        free: () => {
+          throw new Error("free trapped");
+        },
+      }),
+    );
+
+    const reader = pair.readable.getReader();
+    const write = pair.writable.getWriter().write(new Uint8Array(8));
+    write.catch(() => {});
+    const read = reader.read();
+
+    // Both must settle promptly with the ORIGINAL step error, not the
+    // cleanup traps and not a hang.
+    const guard = new Promise((resolve) => setTimeout(() => resolve("timeout"), 300));
+    await expect(Promise.race([read, guard])).rejects.toThrow(/step failed/);
+    await expect(Promise.race([write, guard])).rejects.toThrow(/step failed/);
+  });
+
+  it("rejects malformed finalizer results", async () => {
+    const cases: Array<{ produced: number; done: boolean }> = [
+      { produced: -1, done: true },
+      { produced: 1.5, done: true },
+      { produced: Number.NaN, done: true },
+      { produced: 16, done: "yes" as unknown as boolean },
+    ];
+    for (const result of cases) {
+      const state: FakeState = { freed: [], allocFailAfter: Number.POSITIVE_INFINITY };
+      const pair = codecPair(fakeCodec(state, { end: () => result }));
+      const writer = pair.writable.getWriter();
+      const reading = pair.readable.getReader().read();
+      await writer.write(new Uint8Array(8));
+      writer.close().catch(() => {});
+      await expect(reading).rejects.toThrow(/step failed/);
+    }
+  });
+
+  it("rejects finalizer output from a validation-only codec", async () => {
+    const state: FakeState = { freed: [], allocFailAfter: Number.POSITIVE_INFINITY };
+    const pair = codecPair(
+      fakeCodec(state, {
+        finalizesWithoutOutput: true,
+        end: () => ({ produced: 8, done: true }),
+      }),
+    );
+    const writer = pair.writable.getWriter();
+    const drain = pair.readable
+      .getReader()
+      .read()
+      .catch(() => {});
+    await writer.write(new Uint8Array(8));
+    await expect(writer.close()).rejects.toThrow(/step failed/);
+    await drain;
+  });
+});

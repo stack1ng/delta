@@ -10,7 +10,7 @@ description = "Zstd streaming decompress-only wasm artifact (libzstd via zstd-sy
 crate-type = ["cdylib"]
 
 [dependencies]
-# `experimental` exposes ZSTD_getFrameHeader (static-linking API), used to
-# validate a frame's declared window against the caller's exact byte limit
-# before the window buffer is allocated.
+# `experimental` exposes the static-linking APIs this wrapper uses:
+# ZSTD_DCtx_setMaxWindowSize (exact byte window limit),
+# ZSTD_dParam_getBounds, and ZSTD_getErrorCode.
 zstd-sys = { version = "2", default-features = false, features = ["std", "experimental"] }

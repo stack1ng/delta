@@ -137,21 +137,36 @@ export function codecPair<E extends BaseWasmExports>(
     return ready;
   }
 
+  /**
+   * Best-effort, at-most-once: each handle is cleared before its free is
+   * attempted, and a throwing free must not stop the remaining frees or —
+   * critically — the fail() path that settles the streams.
+   */
   function dispose(): void {
     if (exports === undefined) {
       return;
     }
-    if (ctx !== 0) {
-      codec.free(exports, ctx);
-      ctx = 0;
+    const e = exports;
+    const liveCtx = ctx;
+    ctx = 0;
+    const liveIn = inPtr;
+    inPtr = 0;
+    const liveOut = outPtr;
+    outPtr = 0;
+    if (liveCtx !== 0) {
+      try {
+        codec.free(e, liveCtx);
+      } catch {}
     }
-    if (inPtr !== 0) {
-      exports.wfree(inPtr, inCap);
-      inPtr = 0;
+    if (liveIn !== 0) {
+      try {
+        e.wfree(liveIn, inCap);
+      } catch {}
     }
-    if (outPtr !== 0) {
-      exports.wfree(outPtr, OUT_CAP);
-      outPtr = 0;
+    if (liveOut !== 0) {
+      try {
+        e.wfree(liveOut, OUT_CAP);
+      } catch {}
     }
   }
 
@@ -178,6 +193,18 @@ export function codecPair<E extends BaseWasmExports>(
       signal();
     }
     return failure;
+  }
+
+  /** The end() adapter is JS: validate its result at the trust boundary. */
+  function invalidEndResult(result: { produced: number; done: boolean }): boolean {
+    return (
+      !Number.isInteger(result.produced) ||
+      result.produced < 0 ||
+      result.produced > OUT_CAP ||
+      typeof result.done !== "boolean" ||
+      (result.produced === 0 && !result.done) ||
+      (codec.finalizesWithoutOutput === true && result.produced !== 0)
+    );
   }
 
   function countOutput(produced: number): void {
@@ -267,7 +294,7 @@ export function codecPair<E extends BaseWasmExports>(
           } catch (error) {
             throw fail(error);
           }
-          if (result.produced > OUT_CAP || (result.produced === 0 && !result.done)) {
+          if (invalidEndResult(result)) {
             // Finalization must make progress and stay inside the buffer.
             throw fail(new Error(codec.stepError));
           }
@@ -377,7 +404,11 @@ export function codecPair<E extends BaseWasmExports>(
       // always undefined here — close waits for queued writes.
       if (codec.finalizesWithoutOutput === true && exports !== undefined && ctx !== 0) {
         try {
-          finished = codec.end(exports, ctx, outPtr, OUT_CAP).done;
+          const result = codec.end(exports, ctx, outPtr, OUT_CAP);
+          if (invalidEndResult(result)) {
+            throw new Error(codec.stepError);
+          }
+          finished = result.done;
         } catch (error) {
           return Promise.reject(fail(error));
         }

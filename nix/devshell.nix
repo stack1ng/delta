@@ -20,6 +20,7 @@ pkgs.mkShell {
     llvm.bintools-unwrapped
     pkgs.binaryen
     pkgs.pkg-config
+    pkgs.zstd # CLI for known-content-size interop fixtures in tests
   ];
 
   # Explicit store paths: on darwin the stdenv's wrapped clang shadows bare

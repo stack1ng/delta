@@ -37,6 +37,13 @@ interface GdeltaDecodeExports extends BaseWasmExports {
 
 const wasm = /* @__PURE__ */ lazyWasm<GdeltaDecodeExports>(
   new URL("../../wasm/gdelta_decode.wasm", import.meta.url),
+  [
+    "gdelta_decoder_new",
+    "gdelta_decoder_push",
+    "gdelta_decoder_read",
+    "gdelta_decoder_finish",
+    "gdelta_decoder_free",
+  ],
 );
 
 /**
@@ -108,26 +115,40 @@ export function decodeDelta(
   let totalIn = 0;
   let totalOut = 0;
 
+  /** Best-effort, at-most-once — a throwing free must not stop the rest. */
   function dispose(): void {
     if (exports === undefined) {
       return;
     }
-    if (ctx !== 0) {
-      exports.gdelta_decoder_free(ctx);
-      ctx = 0;
+    const e = exports;
+    const liveCtx = ctx;
+    ctx = 0;
+    if (liveCtx !== 0) {
+      try {
+        e.gdelta_decoder_free(liveCtx);
+      } catch {}
     }
     // The decoder borrows the base; free it only after the decoder is gone.
-    if (basePtr !== 0) {
-      exports.wfree(basePtr, baseLen);
-      basePtr = 0;
+    const liveBase = basePtr;
+    basePtr = 0;
+    if (liveBase !== 0) {
+      try {
+        e.wfree(liveBase, baseLen);
+      } catch {}
     }
-    if (inPtr !== 0) {
-      exports.wfree(inPtr, inCap);
-      inPtr = 0;
+    const liveIn = inPtr;
+    inPtr = 0;
+    if (liveIn !== 0) {
+      try {
+        e.wfree(liveIn, inCap);
+      } catch {}
     }
-    if (outPtr !== 0) {
-      exports.wfree(outPtr, OUT_CAP);
-      outPtr = 0;
+    const liveOut = outPtr;
+    outPtr = 0;
+    if (liveOut !== 0) {
+      try {
+        e.wfree(liveOut, OUT_CAP);
+      } catch {}
     }
   }
 

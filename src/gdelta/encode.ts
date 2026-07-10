@@ -27,6 +27,7 @@ interface GdeltaEncodeExports extends BaseWasmExports {
 
 const wasm = /* @__PURE__ */ lazyWasm<GdeltaEncodeExports>(
   new URL("../../wasm/gdelta_encode.wasm", import.meta.url),
+  ["gdelta_encode", "gdelta_result_ptr", "gdelta_result_len", "gdelta_result_free"],
 );
 
 /**
@@ -63,10 +64,14 @@ export function encodeDelta(
   let resultLen = 0;
   let offset = 0;
 
+  /** Best-effort, at-most-once — a trapping free must not mask errors. */
   function dispose(): void {
-    if (handle !== 0) {
-      exports.gdelta_result_free(handle);
-      handle = 0;
+    const live = handle;
+    handle = 0;
+    if (live !== 0) {
+      try {
+        exports.gdelta_result_free(live);
+      } catch {}
     }
   }
 
@@ -125,13 +130,8 @@ export function encodeDelta(
         resultPtr = exports.gdelta_result_ptr(handle);
         resultLen = exports.gdelta_result_len(handle);
       } catch (error) {
-        // A trapping accessor must not strand the live result handle; if
-        // even the free traps, the original error still wins.
-        try {
-          dispose();
-        } catch {
-          handle = 0;
-        }
+        // A trapping accessor must not strand the live result handle.
+        dispose();
         throw error;
       }
     },

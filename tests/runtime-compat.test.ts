@@ -34,12 +34,13 @@ describe.skipIf(!built || bunBin === undefined)("bun runtime", () => {
         "${join(root, "dist", "pipeline", "index.js")}"
       );
       const input = new Uint8Array(4096).map((_, i) => i % 251);
+      const equal = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
       const out = await decompress(await compress(input), { maxOutputBytes: 8192 });
-      if (out.length !== input.length) throw new Error("zstd mismatch");
+      if (!equal(out, input)) throw new Error("zstd byte mismatch");
       const old = input.slice(0, 2048);
       const framed = await encodeFramedBytes(old, input);
       const restored = await decodeFramedBytes(old, framed);
-      if (restored.length !== input.length) throw new Error("framed mismatch");
+      if (!equal(restored, input)) throw new Error("framed byte mismatch");
       console.log("BUN_SMOKE_OK");
     `;
     const scratch = mkdtempSync(join(tmpdir(), "delta-bun-"));

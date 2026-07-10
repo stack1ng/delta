@@ -77,13 +77,31 @@ export interface LazyWasm<E extends BaseWasmExports> {
   exports(): Promise<E>;
 }
 
-export function lazyWasm<E extends BaseWasmExports>(url: URL): LazyWasm<E> {
+/** Exports every artifact must provide, on top of the entry's own ABI. */
+const COMMON_EXPORTS = ["memory", "walloc", "wfree"] as const;
+
+export function lazyWasm<E extends BaseWasmExports>(
+  url: URL,
+  requiredExports: readonly string[],
+): LazyWasm<E> {
   let instantiated: Promise<E> | undefined;
 
   function instantiate(source?: WasmSource): Promise<E> {
     const attempt = compileFrom(source, url)
       .then((module) => WebAssembly.instantiate(module, {}))
-      .then((instance) => instance.exports as unknown as E);
+      .then((instance) => {
+        // Reject a structurally valid but wrong-direction artifact BEFORE
+        // caching it, so a corrected init() can still succeed afterwards.
+        const missing = [...COMMON_EXPORTS, ...requiredExports].filter(
+          (name) => !(name in instance.exports),
+        );
+        if (missing.length > 0) {
+          throw new Error(
+            `wasm module is missing required exports (wrong artifact?): ${missing.join(", ")}`,
+          );
+        }
+        return instance.exports as unknown as E;
+      });
     // A failed load must not poison the entry forever: clear the cache so a
     // later init()/first-use can retry (e.g. with a corrected source).
     attempt.catch(() => {
