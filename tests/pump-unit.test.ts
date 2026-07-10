@@ -52,6 +52,30 @@ function fakeCodec(
   };
 }
 
+// Echo codec: consumes everything offered, produces that many bytes.
+const echo = (inLen: number, inPos: number) => (BigInt(inLen) << 32n) | BigInt(inLen - inPos);
+
+function abiViolation(step: PumpCodec<BaseWasmExports>["step"]): ReturnType<typeof codecPair> {
+  const state: FakeState = { freed: [], allocFailAfter: Number.POSITIVE_INFINITY };
+  return codecPair(fakeCodec(state, { step }));
+}
+
+async function expectStepRejection(pair: ReturnType<typeof codecPair>): Promise<void> {
+  const reader = pair.readable.getReader();
+  const write = pair.writable.getWriter().write(new Uint8Array(16));
+  write.catch(() => {});
+  const drain = (async () => {
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) {
+        break;
+      }
+    }
+  })();
+  await expect(drain).rejects.toThrow(/step failed/);
+  await expect(write).rejects.toThrow(/step failed/);
+}
+
 function stalledSource(): { stream: ReadableStream<Uint8Array>; cancelled(): boolean } {
   let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({
@@ -149,8 +173,6 @@ describe("pump finalization invariants", () => {
 describe("pump output cap", () => {
   it("caps codec output exactly at maxOutputBytes", async () => {
     const state: FakeState = { freed: [], allocFailAfter: Number.POSITIVE_INFINITY };
-    // Echo codec: consumes everything offered, produces that many bytes.
-    const echo = (inLen: number, inPos: number) => (BigInt(inLen) << 32n) | BigInt(inLen - inPos);
     const make = (cap: number) =>
       codecPair(fakeCodec(state, { step: (_e, _c, _p, inLen, inPos) => echo(inLen, inPos) }), {
         maxOutputBytes: cap,
@@ -167,5 +189,40 @@ describe("pump output cap", () => {
     const tightRead = tight.readable.getReader().read();
     tightWriter.write(new Uint8Array(OUT_CAP)).catch(() => {});
     await expect(tightRead).rejects.toThrow(/maxOutputBytes/);
+  });
+});
+
+describe("pump ABI trust boundary", () => {
+  it("rejects output counts beyond OUT_CAP", async () => {
+    await expectStepRejection(
+      abiViolation((_e, _c, _p, inLen) => (BigInt(inLen) << 32n) | BigInt(OUT_CAP + 1)),
+    );
+  });
+
+  it("rejects input positions moving backwards", async () => {
+    let calls = 0;
+    await expectStepRejection(
+      abiViolation((_e, _c, _p, inLen) => {
+        calls += 1;
+        // First call consumes half; second call reports an earlier position.
+        return calls === 1 ? (BigInt(inLen >> 1) << 32n) | BigInt(OUT_CAP) : (0n << 32n) | 1n;
+      }),
+    );
+  });
+
+  it("rejects input positions past the chunk end", async () => {
+    await expectStepRejection(abiViolation((_e, _c, _p, inLen) => (BigInt(inLen + 1) << 32n) | 0n));
+  });
+
+  it("rejects finalization output beyond OUT_CAP", async () => {
+    const state: FakeState = { freed: [], allocFailAfter: Number.POSITIVE_INFINITY };
+    const pair = codecPair(
+      fakeCodec(state, { end: () => ({ produced: OUT_CAP + 1, done: true }) }),
+    );
+    const writer = pair.writable.getWriter();
+    const reading = pair.readable.getReader().read();
+    await writer.write(new Uint8Array(8));
+    writer.close().catch(() => {});
+    await expect(reading).rejects.toThrow(/step failed/);
   });
 });

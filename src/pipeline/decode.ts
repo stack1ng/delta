@@ -1,6 +1,9 @@
 /**
  * Framed pipeline, decode direction: zstd decompress → gdelta decode behind
- * the versioned frame, fully streaming with one bounded chunk per pull.
+ * the versioned frame, fully streaming with one chunk per pull. Decoded
+ * output (gdelta/zstd bodies) arrives in ≤64 KiB chunks; the RawFull
+ * passthrough deliberately forwards source chunks at the producer's size —
+ * re-chunking an already-materialized buffer would only add copies.
  * Importing only this entry pulls only the decode-side wasm (gdelta decode
  * + zstd decompress).
  *

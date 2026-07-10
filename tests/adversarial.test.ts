@@ -7,6 +7,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { decodeDelta, decodeDeltaBytes } from "../src/gdelta/decode.js";
 import { encodeDelta, encodeDeltaBytes } from "../src/gdelta/encode.js";
@@ -264,20 +265,20 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("wasm loader",
   });
 });
 
-describe("framed source ownership on failure paths", () => {
-  async function frameBody(algo: number, old: Uint8Array): Promise<Uint8Array> {
-    switch (algo) {
-      case FrameAlgo.RawFull:
-        return old;
-      case FrameAlgo.GdeltaRaw:
-        return encodeDeltaBytes(old, old);
-      case FrameAlgo.FullZstd:
-        return compress(old);
-      default:
-        return compress(await encodeDeltaBytes(old, old));
-    }
+async function frameBody(algo: number, old: Uint8Array): Promise<Uint8Array> {
+  switch (algo) {
+    case FrameAlgo.RawFull:
+      return old;
+    case FrameAlgo.GdeltaRaw:
+      return encodeDeltaBytes(old, old);
+    case FrameAlgo.FullZstd:
+      return compress(old);
+    default:
+      return compress(await encodeDeltaBytes(old, old));
   }
+}
 
+describe("framed source ownership on failure paths", () => {
   it("source error after a valid header unlocks the source (all algos)", async () => {
     const old = jsonSnapshot(400, 100);
     for (const algo of Object.values(FrameAlgo)) {
@@ -405,3 +406,34 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("minimal runti
     }
   });
 });
+
+describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))(
+  "encode result-trap safety",
+  () => {
+    it("frees a live result handle when its accessor traps, leaving the module reusable", async () => {
+      // The evaluator's synthetic ABI module (vendored fixture): walloc fails
+      // while a result handle is live, gdelta_result_ptr traps, and
+      // gdelta_result_free releases the handle — so a second encode succeeds
+      // only if the first, trapping encode disposed its handle.
+      const fixture = await WebAssembly.compile(
+        await readFile(join(import.meta.dirname, "fixtures", "gdelta-result-access-fail.wasm")),
+      );
+      // Cache-busting import: a fresh module instance whose lazyWasm cache is
+      // private to this test, so the shared entry stays untouched.
+      const dist = join(import.meta.dirname, "..", "dist", "gdelta", "encode.js");
+      const entry = (await import(`${pathToFileURL(dist).href}?trap-probe`)) as {
+        init(source: WebAssembly.Module): Promise<void>;
+        encodeDeltaBytes(a: Uint8Array, b: Uint8Array): Promise<Uint8Array>;
+      };
+      await entry.init(fixture);
+
+      await expect(entry.encodeDeltaBytes(new Uint8Array(0), new Uint8Array(0))).rejects.toThrow();
+      // Proof the handle was freed: with a live (leaked) handle the fixture's
+      // walloc returns zero, so a leak surfaces as "wasm memory exhausted".
+      // The fixed path gets past allocation and hits the same accessor trap.
+      await expect(entry.encodeDeltaBytes(new Uint8Array(0), new Uint8Array([1]))).rejects.toThrow(
+        /unreachable/,
+      );
+    });
+  },
+);

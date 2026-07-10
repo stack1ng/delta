@@ -12,12 +12,15 @@
  * consumed and drained that chunk — upstream stalls while downstream is idle.
  *
  * Teardown contract: `fail()` is the single rally point — it frees the wasm
- * context/buffers, rejects a pending write, errors the readable, and wakes a
- * suspended pull, exactly once. Early teardown (cancel/abort before the wasm
- * module finished loading) is handled by re-checking `failed` inside the
- * init continuation, and aborts with a write in flight are observed via the
- * writable controller's abort signal (the spec defers `sink.abort` until
- * in-flight writes settle, which would otherwise deadlock).
+ * context/buffers, rejects a pending write, errors both stream controllers,
+ * and wakes a suspended pull, exactly once. Because fail() errors the
+ * controllers directly, pull() never needs to reject — it swallows into
+ * fail(), so a pull racing the failure cannot surface as an unhandled
+ * rejection. Early teardown (cancel/abort before the wasm module finished
+ * loading) is handled by re-checking `failed` inside the init continuation,
+ * and aborts with a write in flight are observed via the writable
+ * controller's abort signal where the runtime provides one (Bun ≤1.3 does
+ * not; there the abort settles when the consumer next pulls or cancels).
  */
 
 import { requireBytes, validateByteCap } from "./bytes.js";
@@ -190,93 +193,112 @@ export function codecPair<E extends BaseWasmExports>(
       return ensureReady();
     },
     async pull(controller) {
-      for (;;) {
-        if (failed) {
-          throw failure;
-        }
-        const e = exports as E;
-
-        if (pending !== undefined) {
-          const posBefore = pending.pos;
-          let packed: bigint;
-          try {
-            packed = codec.step(e, ctx, inPtr, pending.len, pending.pos, outPtr, OUT_CAP);
-          } catch (error) {
-            // A wasm trap must still tear down cleanly (free what remains
-            // freeable, reject the pending write, error both sides).
-            throw fail(error);
-          }
-          if (packed < 0n) {
-            throw fail(new Error(codec.stepErrorFor?.(Number(packed)) ?? codec.stepError));
-          }
-          pending.pos = Number(packed >> 32n);
-          const produced = Number(packed & 0xffffffffn);
-          if (produced === 0 && pending.pos === posBefore && pending.pos < pending.len) {
-            // A codec that consumes nothing and produces nothing on
-            // non-empty input would loop forever; treat it as an error.
-            throw fail(new Error(codec.stepError));
-          }
-          countOutput(produced);
-          if (pending.pos >= pending.len && produced < OUT_CAP) {
-            // Chunk fully consumed and internal output drained: release the
-            // writer so upstream may proceed.
-            pending.resolve();
-            pending = undefined;
-          }
-          if (produced > 0) {
-            controller.enqueue(copyOut(e.memory, outPtr, produced));
-            return;
-          }
-          continue;
-        }
-
-        if (inputClosed) {
-          if (codec.emptyInputError !== undefined && totalIn === 0) {
-            throw fail(new Error(codec.emptyInputError));
-          }
-          if (!finished) {
-            let result: { produced: number; done: boolean };
-            try {
-              result = codec.end(e, ctx, outPtr, OUT_CAP);
-            } catch (error) {
-              throw fail(error);
-            }
-            if (result.produced === 0 && !result.done) {
-              // Finalization must make progress or the loop would spin.
-              throw fail(new Error(codec.stepError));
-            }
-            countOutput(result.produced);
-            finished = result.done;
-            if (result.produced > 0) {
-              const chunk = copyOut(e.memory, outPtr, result.produced);
-              if (finished) {
-                dispose();
-              }
-              controller.enqueue(chunk);
-              if (finished) {
-                closeReadable();
-              }
-              return;
-            }
-            if (!finished) {
-              continue;
-            }
-          }
-          dispose();
-          closeReadable();
-          return;
-        }
-
-        // No input available: wait for the next write, close, or abort.
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-        });
+      try {
+        await drive(controller);
+      } catch (error) {
+        // fail() is the error channel — it has already errored the
+        // controller (or does so now). Resolving here keeps a pull that
+        // raced the failure from surfacing as an unhandled rejection on an
+        // already-errored stream.
+        fail(error);
       }
     },
     cancel(reason) {
       fail(reason);
     },
   });
+
+  async function drive(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
+    for (;;) {
+      if (failed) {
+        return;
+      }
+      const e = exports as E;
+
+      if (pending !== undefined) {
+        const posBefore = pending.pos;
+        let packed: bigint;
+        try {
+          packed = codec.step(e, ctx, inPtr, pending.len, pending.pos, outPtr, OUT_CAP);
+        } catch (error) {
+          // A wasm trap must still tear down cleanly (free what remains
+          // freeable, reject the pending write, error both sides).
+          throw fail(error);
+        }
+        if (packed < 0n) {
+          throw fail(new Error(codec.stepErrorFor?.(Number(packed)) ?? codec.stepError));
+        }
+        const newPos = Number(packed >> 32n);
+        const produced = Number(packed & 0xffffffffn);
+        // Trust boundary: a codec reporting impossible progress (output
+        // beyond the buffer, input position moving backwards or past the
+        // end) would corrupt downstream state — reject it outright.
+        if (produced > OUT_CAP || newPos < posBefore || newPos > pending.len) {
+          throw fail(new Error(codec.stepError));
+        }
+        pending.pos = newPos;
+        if (produced === 0 && newPos === posBefore && newPos < pending.len) {
+          // A codec that consumes nothing and produces nothing on
+          // non-empty input would loop forever; treat it as an error.
+          throw fail(new Error(codec.stepError));
+        }
+        countOutput(produced);
+        if (pending.pos >= pending.len && produced < OUT_CAP) {
+          // Chunk fully consumed and internal output drained: release the
+          // writer so upstream may proceed.
+          pending.resolve();
+          pending = undefined;
+        }
+        if (produced > 0) {
+          controller.enqueue(copyOut(e.memory, outPtr, produced));
+          return;
+        }
+        continue;
+      }
+
+      if (inputClosed) {
+        if (codec.emptyInputError !== undefined && totalIn === 0) {
+          throw fail(new Error(codec.emptyInputError));
+        }
+        if (!finished) {
+          let result: { produced: number; done: boolean };
+          try {
+            result = codec.end(e, ctx, outPtr, OUT_CAP);
+          } catch (error) {
+            throw fail(error);
+          }
+          if (result.produced > OUT_CAP || (result.produced === 0 && !result.done)) {
+            // Finalization must make progress and stay inside the buffer.
+            throw fail(new Error(codec.stepError));
+          }
+          countOutput(result.produced);
+          finished = result.done;
+          if (result.produced > 0) {
+            const chunk = copyOut(e.memory, outPtr, result.produced);
+            if (finished) {
+              dispose();
+            }
+            controller.enqueue(chunk);
+            if (finished) {
+              closeReadable();
+            }
+            return;
+          }
+          if (!finished) {
+            continue;
+          }
+        }
+        dispose();
+        closeReadable();
+        return;
+      }
+
+      // No input available: wait for the next write, close, or abort.
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+    }
+  }
 
   const writable = new WritableStream<Uint8Array>({
     start(controller) {
@@ -285,7 +307,11 @@ export function codecPair<E extends BaseWasmExports>(
       // in-flight write settles only via pull() — observe the abort request
       // directly so it cannot deadlock against an idle consumer. Deferred a
       // microtask so writer.abort()'s own bookkeeping settles first.
-      controller.signal.addEventListener(
+      // Feature-detected: Bun (≤1.3) has no controller.signal; there the
+      // abort is only observed via sink.abort once in-flight writes settle
+      // (i.e. when the consumer next pulls or cancels) — weaker, but every
+      // normal operation works.
+      controller.signal?.addEventListener(
         "abort",
         () => {
           queueMicrotask(() => fail(controller.signal.reason));

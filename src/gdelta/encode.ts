@@ -121,8 +121,19 @@ export function encodeDelta(
         }
       }
 
-      resultPtr = exports.gdelta_result_ptr(handle);
-      resultLen = exports.gdelta_result_len(handle);
+      try {
+        resultPtr = exports.gdelta_result_ptr(handle);
+        resultLen = exports.gdelta_result_len(handle);
+      } catch (error) {
+        // A trapping accessor must not strand the live result handle; if
+        // even the free traps, the original error still wins.
+        try {
+          dispose();
+        } catch {
+          handle = 0;
+        }
+        throw error;
+      }
     },
     pull(controller) {
       if (offset >= resultLen) {

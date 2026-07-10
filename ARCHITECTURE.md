@@ -95,9 +95,9 @@ output, or produce none at all):
   (`decompress`, `decodeDelta`, `decodeFramed`).
 - `maxPatchBytes` — the gdelta patch itself, which bounds the decoder's
   instruction-block buffer (`decodeDelta`, `decodeFramed`).
-- `maxWindowBytes` — the zstd frame history window, checked byte-exactly
-  against each frame's header (staged and parsed before the decoder sees
-  it) and rejected before the window buffer is allocated
+- `maxWindowBytes` — the zstd frame history window, enforced byte-exactly
+  by libzstd's own `ZSTD_DCtx_setMaxWindowSize` (per frame, before the
+  window buffer is allocated; minimum representable cap 1 KiB)
   (`decompressTransform`, `decodeFramed`). Deliberately explicit:
   streaming encoders declare the level's default window (2 MiB at level 3)
   even for tiny payloads, so deriving this from an output cap would reject

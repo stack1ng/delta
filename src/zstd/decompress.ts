@@ -49,15 +49,34 @@ export interface DecompressOptions {
   maxOutputBytes?: number;
   /**
    * Rejects any frame whose header declares a history window larger than
-   * this many bytes — checked byte-exactly against the frame header,
-   * before the window buffer is ever allocated (libzstd's own default
-   * ceiling of 128 MiB still applies when unset). Deliberately not derived
-   * from `maxOutputBytes`: streaming encoders — including this library's —
-   * declare the compression level's default window (e.g. 2 MiB at level 3)
-   * even for tiny payloads, so any implicit derivation would reject valid
-   * frames. Set it explicitly when consuming untrusted input.
+   * this many bytes. Enforced by libzstd itself (`ZSTD_DCtx_setMaxWindowSize`)
+   * byte-exactly, per frame, before the window buffer is allocated; its
+   * default ceiling of 128 MiB still applies when unset. Supported range:
+   * at least 1024 (libzstd's minimum window — smaller finite caps are
+   * rejected as a TypeError rather than silently meaning something else).
+   * Deliberately not derived from `maxOutputBytes`: streaming encoders —
+   * including this library's — declare the compression level's default
+   * window (e.g. 2 MiB at level 3) even for tiny payloads, so any implicit
+   * derivation would reject valid frames. Set it explicitly when consuming
+   * untrusted input.
    */
   maxWindowBytes?: number;
+}
+
+/** libzstd's smallest representable window; smaller caps cannot exist. */
+const MIN_WINDOW_BYTES = 1024;
+
+function validateWindowCap(value: number | undefined): bigint {
+  const cap = validateByteCap(value, "maxWindowBytes");
+  if (cap === Number.POSITIVE_INFINITY) {
+    return 0n; // No override; unambiguous — explicit caps below are ≥ 1024.
+  }
+  if (cap < MIN_WINDOW_BYTES) {
+    throw new TypeError(
+      `maxWindowBytes must be at least ${MIN_WINDOW_BYTES} (libzstd's minimum window)`,
+    );
+  }
+  return BigInt(cap);
 }
 
 /**
@@ -68,8 +87,7 @@ export interface DecompressOptions {
 export function decompressTransform(
   options?: DecompressOptions,
 ): ReadableWritablePair<Uint8Array, Uint8Array> {
-  const maxWindowBytes = validateByteCap(options?.maxWindowBytes, "maxWindowBytes");
-  const windowLimit = maxWindowBytes === Number.POSITIVE_INFINITY ? 0n : BigInt(maxWindowBytes);
+  const windowLimit = validateWindowCap(options?.maxWindowBytes);
   const codec: PumpCodec<ZstdDecompressExports> = {
     exports: () => wasm.exports(),
     create: (e) => e.zstd_decomp_new(windowLimit),
@@ -79,7 +97,7 @@ export function decompressTransform(
     stepError: "zstd: corrupt or unsupported data",
     stepErrorFor: (code) =>
       code === -2
-        ? `zstd: frame window exceeds maxWindowBytes (${maxWindowBytes})`
+        ? `zstd: frame window exceeds maxWindowBytes (${windowLimit})`
         : "zstd: corrupt or unsupported data",
     end: (e, ctx) => {
       if (e.zstd_decomp_done(ctx) !== 1) {

@@ -60,6 +60,7 @@ for src in "${!artifacts[@]}"; do
       --enable-sign-ext --enable-mutable-globals "$tmp" -o "$tmp"
   fi
   mv -f "$tmp" "$dst"
+  chmod 644 "$dst" # data asset, not an executable
 done
 
 ls -la "$OUT"/*.wasm

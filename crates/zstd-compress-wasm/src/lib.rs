@@ -11,13 +11,14 @@ use zstd_sys::{
     ZSTD_createCCtx, ZSTD_freeCCtx, ZSTD_inBuffer, ZSTD_isError, ZSTD_outBuffer,
 };
 
-/// Allocates `len` bytes (1-aligned) inside wasm memory.
-///
-/// # Safety
-/// `len` must be non-zero.
+/// Allocates `len` bytes (1-aligned) inside wasm memory. Returns null when
+/// the size is unrepresentable or memory is exhausted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn walloc(len: u32) -> *mut u8 {
-    unsafe { alloc(Layout::from_size_align_unchecked(len as usize, 1)) }
+pub extern "C" fn walloc(len: u32) -> *mut u8 {
+    match Layout::from_size_align(len as usize, 1) {
+        Ok(layout) => unsafe { alloc(layout) },
+        Err(_) => core::ptr::null_mut(),
+    }
 }
 
 /// Frees a buffer previously returned by `walloc`.
@@ -26,7 +27,9 @@ pub unsafe extern "C" fn walloc(len: u32) -> *mut u8 {
 /// `ptr`/`len` must come from a matching `walloc` call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wfree(ptr: *mut u8, len: u32) {
-    unsafe { dealloc(ptr, Layout::from_size_align_unchecked(len as usize, 1)) }
+    if let Ok(layout) = Layout::from_size_align(len as usize, 1) {
+        unsafe { dealloc(ptr, layout) };
+    }
 }
 
 /// Creates a compression context at `level`. Returns 0 on failure.

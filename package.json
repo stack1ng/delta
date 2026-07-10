@@ -55,7 +55,7 @@
   "scripts": {
     "build": "bun run build:wasm && bun run build:ts",
     "build:wasm": "./scripts/build-wasm.sh",
-    "build:ts": "tsc -p tsconfig.build.json",
+    "build:ts": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "biome check . && oxlint && bun run lint:rust",
     "lint:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",

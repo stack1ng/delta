@@ -140,11 +140,13 @@ const restored: ReadableStream<Uint8Array> = decodeDelta(old, patch);
     `decodeFramed`);
   - `maxPatchBytes` — the gdelta patch itself, i.e. decoder memory
     (`decodeDelta`, `decodeFramed`);
-  - `maxWindowBytes` — the zstd history window, checked byte-exactly
-    against each frame header and rejected before the window is allocated
-    (`decompressTransform`, `decodeFramed`). Explicit rather than derived:
-    streaming encoders declare the level's default window (2 MiB at
-    level 3) even for tiny payloads.
+  - `maxWindowBytes` — the zstd history window, enforced byte-exactly by
+    libzstd itself (`ZSTD_DCtx_setMaxWindowSize`) per frame, before the
+    window buffer is allocated (`decompressTransform`, `decodeFramed`).
+    Supported range starts at 1 KiB — libzstd's minimum window; smaller
+    finite caps are a `TypeError`. Explicit rather than derived: streaming
+    encoders declare the level's default window (2 MiB at level 3) even
+    for tiny payloads.
 - Cancelling any stream — including before initialization finishes —
   frees wasm resources and cancels/unlocks the upstream source; aborting a
   writer with a write in flight settles rather than deadlocking.
