@@ -7,6 +7,9 @@
  * (bundlers rewrite the `new URL(..., import.meta.url)` reference to an
  * asset URL). Runtimes without either path (e.g. Convex) call the entry's
  * exported `init(source)` with precompiled bytes or a module.
+ *
+ * The default URL stays lazy because some isolates throw when `import.meta`
+ * is evaluated. Explicit `init(source)` touches no URL, fetch, or filesystem.
  */
 
 /** Acceptable inputs for an entry's `init()`. */
@@ -37,30 +40,35 @@ async function compileResponse(response: Response): Promise<WebAssembly.Module> 
   return WebAssembly.compile(await response.arrayBuffer());
 }
 
-async function compileFrom(source: WasmSource | undefined, url: URL): Promise<WebAssembly.Module> {
+async function compileFrom(
+  source: WasmSource | undefined,
+  defaultUrl: () => URL,
+): Promise<WebAssembly.Module> {
   if (source instanceof WebAssembly.Module) {
     return source;
   }
-  if (source !== undefined && !(source instanceof URL)) {
-    // Guarded: minimal runtimes without Fetch lack a global Response, and
-    // explicit bytes are exactly the escape hatch such runtimes use.
+  // Both globals guarded: minimal runtimes lack Response (no Fetch) or even
+  // URL, and explicit module/bytes init is exactly the escape hatch such
+  // runtimes use — that path must reference neither.
+  let target: URL;
+  if (typeof URL !== "undefined" && source instanceof URL) {
+    target = source;
+  } else if (source !== undefined) {
     if (typeof Response !== "undefined" && source instanceof Response) {
       return compileResponse(source);
     }
     return WebAssembly.compile(source as BufferSource);
+  } else {
+    target = defaultUrl();
   }
-
-  const target = source instanceof URL ? source : url;
   const isNode =
     typeof process !== "undefined" &&
     process.versions?.node !== undefined &&
     target.protocol === "file:";
   if (isNode) {
-    const [{ readFile }, { fileURLToPath }] = await Promise.all([
-      import("node:fs/promises"),
-      import("node:url"),
-    ]);
-    const bytes = await readFile(fileURLToPath(target));
+    const specifier = "fs/promises";
+    const { readFile } = process.getBuiltinModule?.(specifier) ?? (await import(specifier));
+    const bytes = await readFile(target);
     return WebAssembly.compile(bytes);
   }
   return compileResponse(await fetch(target));
@@ -81,13 +89,13 @@ export interface LazyWasm<E extends BaseWasmExports> {
 const COMMON_CALLABLES = ["walloc", "wfree"] as const;
 
 export function lazyWasm<E extends BaseWasmExports>(
-  url: URL,
+  defaultUrl: () => URL,
   requiredExports: readonly string[],
 ): LazyWasm<E> {
   let instantiated: Promise<E> | undefined;
 
   function instantiate(source?: WasmSource): Promise<E> {
-    const attempt = compileFrom(source, url)
+    const attempt = compileFrom(source, defaultUrl)
       .then((module) => WebAssembly.instantiate(module, {}))
       .then((instance) => {
         // Reject a wrong or malformed artifact BEFORE caching it, so a

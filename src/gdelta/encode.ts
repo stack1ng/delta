@@ -26,7 +26,7 @@ interface GdeltaEncodeExports extends BaseWasmExports {
 }
 
 const wasm = /* @__PURE__ */ lazyWasm<GdeltaEncodeExports>(
-  new URL("../../wasm/gdelta_encode.wasm", import.meta.url),
+  () => new URL("../../wasm/gdelta_encode.wasm", import.meta.url),
   ["gdelta_encode", "gdelta_result_ptr", "gdelta_result_len", "gdelta_result_free"],
 );
 

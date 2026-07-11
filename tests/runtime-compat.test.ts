@@ -13,6 +13,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { build } from "esbuild";
 import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "..");
@@ -98,6 +99,77 @@ describe.skipIf(!built)("prepack gate", () => {
       const corrupt = gateResult(scratch);
       expect(corrupt.status).toBe(1);
       expect(corrupt.stderr).toContain("not valid WebAssembly");
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(!built)("Convex-style isolate", () => {
+  it("browser-bundles and runs the full pipeline without evaluating import.meta", async () => {
+    const bundle = await build({
+      stdin: {
+        resolveDir: root,
+        contents: [
+          'import { init as ge } from "./dist/gdelta/encode.js";',
+          'import { init as gd } from "./dist/gdelta/decode.js";',
+          'import { init as zc } from "./dist/zstd/compress.js";',
+          'import { init as zd } from "./dist/zstd/decompress.js";',
+          'import { encodeFramedBytes } from "./dist/pipeline/encode.js";',
+          'import { decodeFramedBytes } from "./dist/pipeline/decode.js";',
+          'import gew from "./wasm/gdelta_encode.wasm";',
+          'import gdw from "./wasm/gdelta_decode.wasm";',
+          'import zcw from "./wasm/zstd_compress.wasm";',
+          'import zdw from "./wasm/zstd_decompress.wasm";',
+          'Object.defineProperty(WritableStreamDefaultController.prototype, "signal", { configurable: true, get() { throw new TypeError("signal unsupported"); } });',
+          "await Promise.all([ge(new WebAssembly.Module(gew)), gd(new WebAssembly.Module(gdw)), zc(new WebAssembly.Module(zcw)), zd(new WebAssembly.Module(zdw))]);",
+          "const old = Uint8Array.from({ length: 4096 }, (_, i) => i % 251);",
+          "const next = Uint8Array.from({ length: 4600 }, (_, i) => (i % 251) ^ (i > 4000 ? 7 : 0));",
+          "const framed = await encodeFramedBytes(old, next, { fallback: false });",
+          "const out = await decodeFramedBytes(old, framed);",
+          'if (out.length !== next.length || !out.every((b, i) => b === next[i])) throw new Error("mismatch");',
+          'console.log("CONVEX_GATE_OK");',
+        ].join("\n"),
+      },
+      bundle: true,
+      conditions: ["convex", "module"],
+      format: "esm",
+      loader: { ".wasm": "binary" },
+      logLevel: "silent",
+      platform: "browser",
+      target: "es2023",
+      write: false,
+    });
+    const code = bundle.outputFiles[0]?.text;
+    if (code === undefined || !code.includes("import.meta")) {
+      throw new Error("invalid isolate bundle");
+    }
+    const scratch = mkdtempSync(join(tmpdir(), "delta-isolate-"));
+    try {
+      const file = join(scratch, "bundle.mjs");
+      const gate = join(scratch, "gate.mjs");
+      writeFileSync(file, code);
+      writeFileSync(
+        gate,
+        `
+          import vm from "node:vm";
+          import { readFile } from "node:fs/promises";
+          const context = vm.createContext({ console, atob, ReadableStream, WritableStream, WritableStreamDefaultController, TransformStream });
+          const mod = new vm.SourceTextModule(await readFile(${JSON.stringify(file)}, "utf8"), {
+            context,
+            initializeImportMeta() { throw new TypeError("import.meta unsupported"); },
+          });
+          await mod.link(() => { throw new Error("bundle must be self-contained"); });
+          await mod.evaluate();
+        `,
+      );
+      const result = spawnSync(process.execPath, ["--experimental-vm-modules", gate], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      expect(result.stderr).not.toContain("import.meta unsupported");
+      expect(result.stdout).toContain("CONVEX_GATE_OK");
+      expect(result.status).toBe(0);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

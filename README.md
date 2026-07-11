@@ -47,7 +47,7 @@ and `fetch`/explicit `init()`.
 | `@stack1ng/delta/pipeline` | both directions + frame constants | the four above, each still lazy |
 | `@stack1ng/delta/pipeline/encode` | `encodeFramed`, `encodeFramedBytes` | encode-side pair only |
 | `@stack1ng/delta/pipeline/decode` | `decodeFramed`, `decodeFramedBytes` | decode-side pair only |
-| `@stack1ng/delta/wasm/*.wasm` | the raw artifacts, for bundler `?url` imports and explicit `init()` | — |
+| `@stack1ng/delta/wasm/*.wasm` | the raw artifacts for explicit `init()` | — |
 | `@stack1ng/delta` | re-exports everything (`init` renamed per algo) | none until first call |
 
 Importing one entry never loads another entry's wasm — enforced by tests,
@@ -163,19 +163,26 @@ Each entry resolves its binary via `new URL("../../wasm/….wasm",
 import.meta.url)`:
 
 - **Node** — read from disk automatically; nothing to do.
-- **Vite / Rolldown / esbuild** — the `new URL` pattern is rewritten to a
-  hashed asset URL and fetched; nothing to do.
-- **Convex or other sandboxed runtimes** — call the entry's `init()` once
-  with your own source before first use. The artifacts are exported as
-  package subpaths (`@stack1ng/delta/wasm/*.wasm`) so bundler asset
-  imports resolve:
+- **Vite / Rolldown** — the `new URL` pattern is rewritten to a hashed asset
+  URL and fetched; nothing to do.
+- **Plain esbuild** — import an exported artifact with the `binary` loader and
+  pass its bytes to `init()`.
+- **Convex or other sandboxed runtimes** — copy the needed artifacts from
+  `node_modules/@stack1ng/delta/wasm/` into your function directory, import
+  them directly (without `?url`), and initialize every leaf used by a pipeline:
 
   ```ts
-  import { init } from "@stack1ng/delta/gdelta/decode";
-  import wasmUrl from "@stack1ng/delta/wasm/gdelta_decode.wasm?url"; // bundler-specific
+  import { init as initGdelta } from "@stack1ng/delta/gdelta/decode";
+  import { init as initZstd } from "@stack1ng/delta/zstd/decompress";
+  import gdelta from "./gdelta_decode.wasm";
+  import zstd from "./zstd_decompress.wasm";
 
-  await init(new URL(wasmUrl, import.meta.url)); // or bytes / WebAssembly.Module / Response
+  await Promise.all([initGdelta(gdelta), initZstd(zstd)]);
   ```
+
+  Encoding likewise needs `gdelta_encode.wasm` and `zstd_compress.wasm`.
+  In `convex/wasm.d.ts`, add
+  `declare module "*.wasm" { const module: WebAssembly.Module; export default module; }`.
 
 ## Development
 

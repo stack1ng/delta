@@ -28,7 +28,7 @@ interface ZstdCompressExports extends BaseWasmExports {
 }
 
 const wasm = /* @__PURE__ */ lazyWasm<ZstdCompressExports>(
-  new URL("../../wasm/zstd_compress.wasm", import.meta.url),
+  () => new URL("../../wasm/zstd_compress.wasm", import.meta.url),
   ["zstd_comp_new", "zstd_comp_transform", "zstd_comp_end", "zstd_comp_free"],
 );
 

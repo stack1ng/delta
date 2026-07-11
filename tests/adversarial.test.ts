@@ -31,6 +31,13 @@ import {
   writeCopy,
 } from "./helpers.js";
 
+// Every loader below inits from an explicit source, so the default-URL thunk
+// must never run (the lazy contract that keeps import.meta-hostile isolates
+// working — see internal/wasm.ts header).
+const neverDefaultUrl = (): URL => {
+  throw new Error("default URL must not be evaluated for explicit init");
+};
+
 const wasmDir = resolve(import.meta.dirname, "..", "wasm");
 
 function stalledSource(): { stream: ReadableStream<Uint8Array>; cancelled(): boolean } {
@@ -250,7 +257,7 @@ describe("strict options and inputs", () => {
 describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("wasm loader", () => {
   it("accepts a Response without the wasm MIME type", async () => {
     const bytes = await readFile(join(wasmDir, "gdelta_decode.wasm"));
-    const loader = lazyWasm(new URL("file:///nonexistent.wasm"), [
+    const loader = lazyWasm(neverDefaultUrl, [
       "gdelta_decoder_new",
       "gdelta_decoder_push",
       "gdelta_decoder_read",
@@ -264,7 +271,7 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("wasm loader",
   });
 
   it("retries after a failed initialization instead of caching the error", async () => {
-    const loader = lazyWasm(new URL("file:///nonexistent.wasm"), [
+    const loader = lazyWasm(neverDefaultUrl, [
       "gdelta_decoder_new",
       "gdelta_decoder_push",
       "gdelta_decoder_read",
@@ -411,7 +418,7 @@ describe.skipIf(!existsSync(join(wasmDir, "gdelta_decode.wasm")))("minimal runti
     // biome-ignore lint/suspicious/noExplicitAny: deliberate global surgery
     (globalThis as any).Response = undefined;
     try {
-      const loader = lazyWasm(new URL("file:///nonexistent.wasm"), [
+      const loader = lazyWasm(neverDefaultUrl, [
         "gdelta_decoder_new",
         "gdelta_decoder_push",
         "gdelta_decoder_read",

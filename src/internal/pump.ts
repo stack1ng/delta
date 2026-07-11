@@ -334,14 +334,18 @@ export function codecPair<E extends BaseWasmExports>(
       // in-flight write settles only via pull() — observe the abort request
       // directly so it cannot deadlock against an idle consumer. Deferred a
       // microtask so writer.abort()'s own bookkeeping settles first.
-      // Feature-detected: Bun (≤1.3) has no controller.signal; there the
+      // Feature-detected: some runtimes omit or throw for controller.signal; there the
       // abort is only observed via sink.abort once in-flight writes settle
       // (i.e. when the consumer next pulls or cancels) — weaker, but every
       // normal operation works.
-      controller.signal?.addEventListener(
+      let controllerSignal: AbortSignal | undefined;
+      try {
+        controllerSignal = controller.signal;
+      } catch {}
+      controllerSignal?.addEventListener(
         "abort",
         () => {
-          queueMicrotask(() => fail(controller.signal.reason));
+          queueMicrotask(() => fail(controllerSignal.reason));
         },
         { once: true },
       );
