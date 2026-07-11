@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- added 0 config WASM import support
+
 ## 0.1.2
 
 - Release 0.1.2
