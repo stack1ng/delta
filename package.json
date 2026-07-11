@@ -16,6 +16,12 @@
   "engines": {
     "node": ">=20"
   },
+  "imports": {
+    "#wasm/*": {
+      "convex": "./wasm/*.js",
+      "default": "./dist/internal/wasm.js"
+    }
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

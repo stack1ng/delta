@@ -12,6 +12,7 @@
  * reconstructed strictly on downstream demand.
  */
 
+import { bundledWasm } from "#wasm/gdelta_decode";
 import {
   asBytes,
   bytesToStream,
@@ -44,6 +45,7 @@ const wasm = /* @__PURE__ */ lazyWasm<GdeltaDecodeExports>(
     "gdelta_decoder_finish",
     "gdelta_decoder_free",
   ],
+  bundledWasm,
 );
 
 /**

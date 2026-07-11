@@ -10,10 +10,19 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { build } from "esbuild";
+import { isAbsolute, join, resolve } from "node:path";
+import { build, type Plugin } from "esbuild";
 import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "..");
@@ -105,24 +114,72 @@ describe.skipIf(!built)("prepack gate", () => {
   });
 });
 
-describe.skipIf(!built)("Convex-style isolate", () => {
-  it("browser-bundles and runs the full pipeline without evaluating import.meta", async () => {
-    const bundle = await build({
-      stdin: {
-        resolveDir: root,
-        contents: [
-          'import { init as ge } from "./dist/gdelta/encode.js";',
-          'import { init as gd } from "./dist/gdelta/decode.js";',
-          'import { init as zc } from "./dist/zstd/compress.js";',
-          'import { init as zd } from "./dist/zstd/decompress.js";',
-          'import { encodeFramedBytes } from "./dist/pipeline/encode.js";',
-          'import { decodeFramedBytes } from "./dist/pipeline/decode.js";',
-          'import gew from "./wasm/gdelta_encode.wasm";',
-          'import gdw from "./wasm/gdelta_decode.wasm";',
-          'import zcw from "./wasm/zstd_compress.wasm";',
-          'import zdw from "./wasm/zstd_decompress.wasm";',
+const convexWasmPlugin: Plugin = {
+  name: "convex-wasm",
+  setup(pluginBuild) {
+    pluginBuild.onResolve({ filter: /\.wasm$/ }, (args) => {
+      if (args.namespace === "wasm-stub") {
+        return { path: args.path, namespace: "wasm-binary" };
+      }
+      if (args.resolveDir === "") {
+        return;
+      }
+      return {
+        path: isAbsolute(args.path) ? args.path : join(args.resolveDir, args.path),
+        namespace: "wasm-stub",
+      };
+    });
+    pluginBuild.onLoad({ filter: /.*/, namespace: "wasm-stub" }, (args) => ({
+      contents: `import wasm from ${JSON.stringify(args.path)};
+        export default new WebAssembly.Module(wasm);`,
+    }));
+    pluginBuild.onLoad({ filter: /.*/, namespace: "wasm-binary" }, (args) => ({
+      contents: readFileSync(args.path),
+      loader: "binary",
+    }));
+  },
+};
+
+function installPackage(scratch: string): void {
+  const installed = join(scratch, "node_modules", "@stack1ng", "delta");
+  mkdirSync(installed, { recursive: true });
+  for (const item of ["dist", "wasm", "package.json"]) {
+    cpSync(join(root, item), join(installed, item), { recursive: true });
+  }
+}
+
+async function bundleForConvex(scratch: string, contents: string) {
+  return build({
+    stdin: { resolveDir: scratch, contents },
+    bundle: true,
+    conditions: ["convex", "module"],
+    format: "esm",
+    logLevel: "silent",
+    plugins: [convexWasmPlugin],
+    platform: "browser",
+    target: "es2023",
+    write: false,
+  });
+}
+
+function bundledArtifacts(bundle: Awaited<ReturnType<typeof bundleForConvex>>): string[] {
+  const code = bundle.outputFiles[0]?.text ?? "";
+  return ["gdelta_decode", "gdelta_encode", "zstd_compress", "zstd_decompress"]
+    .filter((artifact) => code.includes(artifact))
+    .map((artifact) => `${artifact}.wasm`);
+}
+
+describe.skipIf(!built)("Convex isolate", () => {
+  it("imports the package normally and runs the full pipeline without consumer setup", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "delta-isolate-"));
+    try {
+      installPackage(scratch);
+      const bundle = await bundleForConvex(
+        scratch,
+        [
+          'import { encodeFramedBytes } from "@stack1ng/delta/pipeline/encode";',
+          'import { decodeFramedBytes } from "@stack1ng/delta/pipeline/decode";',
           'Object.defineProperty(WritableStreamDefaultController.prototype, "signal", { configurable: true, get() { throw new TypeError("signal unsupported"); } });',
-          "await Promise.all([ge(new WebAssembly.Module(gew)), gd(new WebAssembly.Module(gdw)), zc(new WebAssembly.Module(zcw)), zd(new WebAssembly.Module(zdw))]);",
           "const old = Uint8Array.from({ length: 4096 }, (_, i) => i % 251);",
           "const next = Uint8Array.from({ length: 4600 }, (_, i) => (i % 251) ^ (i > 4000 ? 7 : 0));",
           "const framed = await encodeFramedBytes(old, next, { fallback: false });",
@@ -130,22 +187,17 @@ describe.skipIf(!built)("Convex-style isolate", () => {
           'if (out.length !== next.length || !out.every((b, i) => b === next[i])) throw new Error("mismatch");',
           'console.log("CONVEX_GATE_OK");',
         ].join("\n"),
-      },
-      bundle: true,
-      conditions: ["convex", "module"],
-      format: "esm",
-      loader: { ".wasm": "binary" },
-      logLevel: "silent",
-      platform: "browser",
-      target: "es2023",
-      write: false,
-    });
-    const code = bundle.outputFiles[0]?.text;
-    if (code === undefined || !code.includes("import.meta")) {
-      throw new Error("invalid isolate bundle");
-    }
-    const scratch = mkdtempSync(join(tmpdir(), "delta-isolate-"));
-    try {
+      );
+      expect(bundledArtifacts(bundle)).toEqual([
+        "gdelta_decode.wasm",
+        "gdelta_encode.wasm",
+        "zstd_compress.wasm",
+        "zstd_decompress.wasm",
+      ]);
+      const code = bundle.outputFiles[0]?.text;
+      if (code === undefined || !code.includes("import.meta")) {
+        throw new Error("invalid isolate bundle");
+      }
       const file = join(scratch, "bundle.mjs");
       const gate = join(scratch, "gate.mjs");
       writeFileSync(file, code);
@@ -170,6 +222,26 @@ describe.skipIf(!built)("Convex-style isolate", () => {
       expect(result.stderr).not.toContain("import.meta unsupported");
       expect(result.stdout).toContain("CONVEX_GATE_OK");
       expect(result.status).toBe(0);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps root and pipeline imports isolated to the wasm they use", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "delta-isolation-"));
+    try {
+      installPackage(scratch);
+      const leaf = await bundleForConvex(
+        scratch,
+        'import { decodeDelta } from "@stack1ng/delta"; console.log(decodeDelta);',
+      );
+      expect(bundledArtifacts(leaf)).toEqual(["gdelta_decode.wasm"]);
+
+      const pipeline = await bundleForConvex(
+        scratch,
+        'import { decodeFramed } from "@stack1ng/delta/pipeline"; console.log(decodeFramed);',
+      );
+      expect(bundledArtifacts(pipeline)).toEqual(["gdelta_decode.wasm", "zstd_decompress.wasm"]);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

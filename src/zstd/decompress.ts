@@ -10,6 +10,7 @@
  * complete frame boundary, and empty input is rejected as invalid.
  */
 
+import { bundledWasm } from "#wasm/zstd_decompress";
 import { bytesToStream, collect, requireBytes, validateByteCap } from "../internal/bytes.js";
 import { codecPair, type PumpCodec } from "../internal/pump.js";
 import { type BaseWasmExports, lazyWasm, type WasmSource } from "../internal/wasm.js";
@@ -31,6 +32,7 @@ interface ZstdDecompressExports extends BaseWasmExports {
 const wasm = /* @__PURE__ */ lazyWasm<ZstdDecompressExports>(
   () => new URL("../../wasm/zstd_decompress.wasm", import.meta.url),
   ["zstd_decomp_new", "zstd_decomp_transform", "zstd_decomp_done", "zstd_decomp_free"],
+  bundledWasm,
 );
 
 /**

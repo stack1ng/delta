@@ -1,7 +1,7 @@
 /**
  * Convenience root that re-exports the documented surface.
  *
- * All wasm loading is lazy (first call), so importing this module loads no
+ * Wasm instantiation is lazy (first call), so importing this module runs no
  * wasm by itself; with a tree-shaking bundler unused entries disappear
  * entirely. For guaranteed-minimal bundles import the subpaths directly,
  * e.g. `@stack1ng/delta/gdelta/decode`.

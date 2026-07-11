@@ -61,7 +61,7 @@ for (const required of [
   "README.md",
   "dist/index.d.ts",
   "dist/index.js",
-  ...expectedWasm,
+  ...expectedWasm.flatMap((path) => [path, path.replace(/\.wasm$/, ".js")]),
 ]) {
   if (!paths.includes(required)) {
     throw new Error(`packed package is missing ${required}`);

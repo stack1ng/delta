@@ -79,6 +79,7 @@ describe.skipIf(!built)("entry isolation (runtime)", () => {
 
     const scratch = mkdtempSync(join(tmpdir(), "delta-isolation-"));
     try {
+      cpSync(join(root, "package.json"), join(scratch, "package.json"));
       cpSync(dist, join(scratch, "dist"), { recursive: true });
       mkdirSync(join(scratch, "wasm"));
       cpSync(join(wasmDir, "gdelta_decode.wasm"), join(scratch, "wasm", "gdelta_decode.wasm"));

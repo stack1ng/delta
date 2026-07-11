@@ -2,18 +2,17 @@
  * Lazy per-entry WASM loading.
  *
  * Each public entrypoint owns exactly one wasm binary and instantiates it on
- * first use, so importing an entry never loads another entry's wasm. In Node
- * the binary is read from disk next to the package; elsewhere it is fetched
- * (bundlers rewrite the `new URL(..., import.meta.url)` reference to an
- * asset URL). Runtimes without either path (e.g. Convex) call the entry's
- * exported `init(source)` with precompiled bytes or a module.
- *
- * The default URL stays lazy because some isolates throw when `import.meta`
- * is evaluated. Explicit `init(source)` touches no URL, fetch, or filesystem.
+ * first use, so importing an entry never loads another entry's wasm. Node
+ * reads its package file, browser bundlers rewrite its URL, and Convex's
+ * package condition supplies a compiled module from a relative wasm import.
+ * Explicit `init(source)` overrides those defaults. The URL remains a lazy
+ * callback because some isolates throw when `import.meta` is evaluated.
  */
 
 /** Acceptable inputs for an entry's `init()`. */
 export type WasmSource = WebAssembly.Module | BufferSource | Response | URL;
+
+export const bundledWasm: undefined = undefined;
 
 /** Common exports every artifact provides. */
 export interface BaseWasmExports {
@@ -91,10 +90,11 @@ const COMMON_CALLABLES = ["walloc", "wfree"] as const;
 export function lazyWasm<E extends BaseWasmExports>(
   defaultUrl: () => URL,
   requiredExports: readonly string[],
+  bundledSource?: WasmSource,
 ): LazyWasm<E> {
   let instantiated: Promise<E> | undefined;
 
-  function instantiate(source?: WasmSource): Promise<E> {
+  function instantiate(source: WasmSource | undefined = bundledSource): Promise<E> {
     const attempt = compileFrom(source, defaultUrl)
       .then((module) => WebAssembly.instantiate(module, {}))
       .then((instance) => {

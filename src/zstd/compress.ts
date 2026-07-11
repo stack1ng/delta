@@ -9,6 +9,7 @@
  * never queues output the consumer has not asked for.
  */
 
+import { bundledWasm } from "#wasm/zstd_compress";
 import { bytesToStream, collect, requireBytes } from "../internal/bytes.js";
 import { codecPair, type PumpCodec } from "../internal/pump.js";
 import { type BaseWasmExports, lazyWasm, type WasmSource } from "../internal/wasm.js";
@@ -30,6 +31,7 @@ interface ZstdCompressExports extends BaseWasmExports {
 const wasm = /* @__PURE__ */ lazyWasm<ZstdCompressExports>(
   () => new URL("../../wasm/zstd_compress.wasm", import.meta.url),
   ["zstd_comp_new", "zstd_comp_transform", "zstd_comp_end", "zstd_comp_free"],
+  bundledWasm,
 );
 
 /**

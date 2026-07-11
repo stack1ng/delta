@@ -11,7 +11,7 @@ WASM-capable bundler runtimes (Vite/Rolldown, Convex, workers).
   (see [FRAME.md](./FRAME.md)).
 
 Bytes and Web Streams only. No string/JSON helpers, no filesystem API.
-Each entrypoint loads its own small wasm binary, lazily.
+Each entrypoint owns one small wasm binary; instantiation is lazy.
 
 AI Usage disclaimer: This project was initially designed by myself, and implemented by fable 5. It also went through multiple rounds of adversarial review between fable 5 and gpt-5.6 ultra.
 
@@ -33,8 +33,8 @@ Encode 0.29 ms, decode 0.06 ms. Run `bun run bench` for the full table.
 bun add @stack1ng/delta   # or npm/pnpm/yarn
 ```
 
-Requires Node ≥ 20 (Web Streams, wasm) or any runtime with `WebAssembly`
-and `fetch`/explicit `init()`.
+Requires Node ≥ 20 (Web Streams, wasm) or a Web Streams runtime with
+`WebAssembly` and a supported bundler, `fetch`, or explicit `init()`.
 
 ## Entrypoints
 
@@ -159,30 +159,12 @@ const restored: ReadableStream<Uint8Array> = decodeDelta(old, patch);
 
 ## WASM loading in bundlers / Convex
 
-Each entry resolves its binary via `new URL("../../wasm/….wasm",
-import.meta.url)`:
+Each entry selects the runtime-appropriate wasm source:
 
-- **Node** — read from disk automatically; nothing to do.
-- **Vite / Rolldown** — the `new URL` pattern is rewritten to a hashed asset
-  URL and fetched; nothing to do.
-- **Plain esbuild** — import an exported artifact with the `binary` loader and
-  pass its bytes to `init()`.
-- **Convex or other sandboxed runtimes** — copy the needed artifacts from
-  `node_modules/@stack1ng/delta/wasm/` into your function directory, import
-  them directly (without `?url`), and initialize every leaf used by a pipeline:
-
-  ```ts
-  import { init as initGdelta } from "@stack1ng/delta/gdelta/decode";
-  import { init as initZstd } from "@stack1ng/delta/zstd/decompress";
-  import gdelta from "./gdelta_decode.wasm";
-  import zstd from "./zstd_decompress.wasm";
-
-  await Promise.all([initGdelta(gdelta), initZstd(zstd)]);
-  ```
-
-  Encoding likewise needs `gdelta_encode.wasm` and `zstd_compress.wasm`.
-  In `convex/wasm.d.ts`, add
-  `declare module "*.wasm" { const module: WebAssembly.Module; export default module; }`.
+- **Node and Vite/Rolldown** — loading and instantiation are lazy and automatic.
+- **Convex** — compilation happens at module evaluation; instantiation stays lazy.
+- **Plain esbuild and other sandboxes** — pass bytes or a compiled module to
+  each leaf's `init()` before first use.
 
 ## Development
 

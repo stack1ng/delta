@@ -24,9 +24,9 @@ Rules the layout enforces structurally (and `tests/isolation.test.ts` gates):
 
 - gdelta modules never import zstd modules and vice versa; the pipeline is
   the only composer.
-- Each entry references exactly one `.wasm` asset via
-  `new URL(..., import.meta.url)`; importing decode cannot load encode wasm.
-- All modules are side-effect-free ESM (`sideEffects: false`); wasm loads
+- Each entry owns one URL fallback and one condition-selected wasm source;
+  importing decode cannot load encode wasm.
+- All modules are side-effect-free ESM (`sideEffects: false`); wasm instantiates
   lazily on first call, or eagerly via each entry's exported `init()`.
 
 ## Why encode/decode wasm are split
